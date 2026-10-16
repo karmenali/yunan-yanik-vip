@@ -1,0 +1,48 @@
+version: '3.8'
+
+services:
+  yunan_yanik_db:
+    image: postgres:16-alpine
+    container_name: yunan_yanik_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DB_USER:-yanik_admin}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-YanikSecret2026!}
+      POSTGRES_DB: ${DB_NAME:-yunan_yanik}
+    volumes:
+      - yunan_yanik_pgdata:/var/lib/postgresql/data
+    networks:
+      - yunan_yanik_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-yanik_admin} -d ${DB_NAME:-yunan_yanik}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  yunan_yanik_server:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    container_name: yunan_yanik_server
+    restart: unless-stopped
+    ports:
+      - "${PORT:-4545}:4545"
+    environment:
+      NODE_ENV: production
+      PORT: 4545
+      DATABASE_URL: postgres://${DB_USER:-yanik_admin}:${DB_PASSWORD:-YanikSecret2026!}@yunan_yanik_db:5432/${DB_NAME:-yunan_yanik}
+      JWT_SECRET: ${JWT_SECRET:-YunanYanikSuperSecretJwtKey2026!}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin123456}
+    depends_on:
+      yunan_yanik_db:
+        condition: service_healthy
+    networks:
+      - yunan_yanik_net
+
+volumes:
+  yunan_yanik_pgdata:
+
+networks:
+  yunan_yanik_net:
+    driver: bridge

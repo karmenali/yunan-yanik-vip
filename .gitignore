@@ -1,0 +1,20 @@
+# Node / Server
+node_modules/
+server/node_modules/
+server/dist/
+.env
+server/.env
+
+# Flutter / Mobile
+mobile/.dart_tool/
+mobile/.packages
+mobile/build/
+mobile/.flutter-plugins
+mobile/.flutter-plugins-dependencies
+mobile/android/.gradle/
+mobile/android/local.properties
+mobile/android/app/debug/
+mobile/android/app/profile/
+mobile/android/app/release/
+*.iml
+.DS_Store
