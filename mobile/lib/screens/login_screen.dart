@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../services/game_service.dart';
 import 'lobby_screen.dart';
 
@@ -13,10 +15,33 @@ class _LoginScreenState extends State<LoginScreen> {
   final _usernameCtrl = TextEditingController();
   final _passwordCtrl = TextEditingController();
   bool _loading = false;
+  bool _obscurePassword = true;
+  bool _rememberMe = true;
   String? _error;
 
+  @override
+  void initState() {
+    super.initState();
+    SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
+    _loadSavedCredentials();
+  }
+
+  Future<void> _loadSavedCredentials() async {
+    final prefs = await SharedPreferences.getInstance();
+    final savedUser = prefs.getString('saved_username');
+    final savedPass = prefs.getString('saved_password');
+    if (savedUser != null && savedUser.isNotEmpty) {
+      _usernameCtrl.text = savedUser;
+      _passwordCtrl.text = savedPass ?? '';
+      if (mounted) setState(() {});
+    }
+  }
+
   Future<void> _handleLogin() async {
-    if (_usernameCtrl.text.trim().isEmpty || _passwordCtrl.text.isEmpty) {
+    final uname = _usernameCtrl.text.trim();
+    final pass = _passwordCtrl.text;
+
+    if (uname.isEmpty || pass.isEmpty) {
       setState(() => _error = 'Lütfen kullanıcı adı ve şifrenizi girin.');
       return;
     }
@@ -27,10 +52,17 @@ class _LoginScreenState extends State<LoginScreen> {
     });
 
     try {
-      await GameService.instance.login(
-        _usernameCtrl.text.trim(),
-        _passwordCtrl.text,
-      );
+      await GameService.instance.login(uname, pass);
+
+      final prefs = await SharedPreferences.getInstance();
+      if (_rememberMe) {
+        await prefs.setString('saved_username', uname);
+        await prefs.setString('saved_password', pass);
+      } else {
+        await prefs.remove('saved_username');
+        await prefs.remove('saved_password');
+      }
+
       if (!mounted) return;
       Navigator.of(context).pushReplacement(
         MaterialPageRoute(builder: (_) => const LobbyScreen()),
@@ -44,272 +76,295 @@ class _LoginScreenState extends State<LoginScreen> {
     }
   }
 
-  Future<void> _showServerConfigDialog() async {
-    final urlCtrl = TextEditingController(text: GameService.instance.serverUrl);
-    await showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: const Color(0xFF0E2F21),
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(16),
-          side: const BorderSide(color: Color(0xFFD4AF37), width: 1.5),
-        ),
-        title: const Text(
-          '🌐 Linux Oyun Sunucusu Adresi',
-          style: TextStyle(color: Color(0xFFFDE047), fontWeight: FontWeight.bold),
-        ),
-        content: SizedBox(
-          width: 380,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text(
-                'Örnek: http://SUNUCU_IP_ADRESINIZ:4545',
-                style: TextStyle(color: Colors.white70, fontSize: 12),
-              ),
-              const SizedBox(height: 10),
-              TextField(
-                controller: urlCtrl,
-                style: const TextStyle(color: Colors.white),
-                decoration: const InputDecoration(
-                  labelText: 'Sunucu URL',
-                  labelStyle: TextStyle(color: Colors.white70),
-                  prefixIcon: Icon(Icons.dns, color: Color(0xFFD4AF37)),
-                ),
-              ),
-            ],
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('İptal', style: TextStyle(color: Colors.white70)),
-          ),
-          ElevatedButton(
-            style: ElevatedButton.styleFrom(
-              backgroundColor: const Color(0xFFD4AF37),
-              foregroundColor: Colors.black,
-            ),
-            onPressed: () async {
-              await GameService.instance.setServerUrl(urlCtrl.text);
-              if (ctx.mounted) Navigator.pop(ctx);
-              setState(() {});
-            },
-            child: const Text('Kaydet'),
-          ),
-        ],
-      ),
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
+    final size = MediaQuery.sizeOf(context);
+
     return Scaffold(
       body: Container(
-        width: double.infinity,
-        height: double.infinity,
+        width: size.width,
+        height: size.height,
         decoration: const BoxDecoration(
-          gradient: RadialGradient(
-            center: Alignment.center,
-            radius: 1.1,
+          gradient: LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
             colors: [
-              Color(0xFF0F3D29),
-              Color(0xFF061A12),
-              Color(0xFF020C08),
+              Color(0xFF0E3A27),
+              Color(0xFF071F15),
+              Color(0xFF030D08),
             ],
           ),
         ),
-        child: Stack(
-          children: [
-            // Sağ üst Sunucu Ayarı Butonu
-            Positioned(
-              top: 16,
-              right: 20,
-              child: OutlinedButton.icon(
-                style: OutlinedButton.styleFrom(
-                  foregroundColor: const Color(0xFFFDE047),
-                  side: const BorderSide(color: Color(0xFFD4AF37)),
-                ),
-                onPressed: _showServerConfigDialog,
-                icon: const Icon(Icons.settings_ethernet, size: 18),
-                label: Text(
-                  'Sunucu: ${GameService.instance.serverUrl}',
-                  style: const TextStyle(fontSize: 12),
-                ),
-              ),
-            ),
-
-            // Merkez VIP Giriş Kartı
-            Center(
-              child: SingleChildScrollView(
-                child: Container(
-                  width: 440,
-                  padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 22),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF0A261A).withValues(alpha: 0.92),
-                    borderRadius: BorderRadius.circular(22),
-                    border: Border.all(color: const Color(0xFFD4AF37), width: 2),
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withValues(alpha: 0.7),
-                        blurRadius: 24,
-                        spreadRadius: 4,
+        child: SafeArea(
+          child: Center(
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 20),
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 420),
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    // ÜST KULÜP AMBLEMİ & LOGO
+                    Container(
+                      width: 96,
+                      height: 96,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        gradient: const RadialGradient(
+                          colors: [Color(0xFFFDE047), Color(0xFFB45309)],
+                        ),
+                        border: Border.all(color: Colors.white, width: 2.5),
+                        boxShadow: [
+                          BoxShadow(
+                            color: const Color(0xFFD4AF37).withValues(alpha: 0.45),
+                            blurRadius: 28,
+                            spreadRadius: 4,
+                          ),
+                        ],
                       ),
-                    ],
-                  ),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      const Row(
-                        mainAxisAlignment: MainAxisAlignment.center,
+                      child: const Center(
+                        child: Text(
+                          '🃏',
+                          style: TextStyle(fontSize: 48),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 18),
+                    const Text(
+                      'ROYAL KULÜP',
+                      style: TextStyle(
+                        color: Color(0xFFFDE047),
+                        fontSize: 28,
+                        fontWeight: FontWeight.w900,
+                        letterSpacing: 2.0,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    const Text(
+                      'YUNAN YANIK & VIP OYUN MERKEZİ',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        color: Colors.white70,
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w600,
+                        letterSpacing: 1.1,
+                      ),
+                    ),
+                    const SizedBox(height: 32),
+
+                    // GİRİŞ FORMU KARTI
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(24),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF0A2419).withValues(alpha: 0.94),
+                        borderRadius: BorderRadius.circular(24),
+                        border: Border.all(
+                          color: const Color(0xFFD4AF37).withValues(alpha: 0.75),
+                          width: 1.6,
+                        ),
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.black.withValues(alpha: 0.65),
+                            blurRadius: 24,
+                            offset: const Offset(0, 10),
+                          ),
+                        ],
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Text('♠️ ♥️ ', style: TextStyle(fontSize: 22)),
-                          Text(
-                            'YUNAN YANIK VIP',
+                          const Text(
+                            'Üye Girişi',
                             style: TextStyle(
-                              color: Color(0xFFFDE047),
-                              fontSize: 24,
-                              fontWeight: FontWeight.w900,
-                              letterSpacing: 1.5,
+                              color: Colors.white,
+                              fontSize: 18,
+                              fontWeight: FontWeight.bold,
                             ),
                           ),
-                          Text(' ♣️ ♦️', style: TextStyle(fontSize: 22)),
-                        ],
-                      ),
-                      const SizedBox(height: 4),
-                      const Text(
-                        'Özel Kurallı Çok Oyunculu Kulüp Salonu',
-                        style: TextStyle(color: Colors.white70, fontSize: 12),
-                      ),
-                      const SizedBox(height: 16),
+                          const SizedBox(height: 4),
+                          const Text(
+                            'Kulüp hesabınızla oyun salonuna bağlanın',
+                            style: TextStyle(color: Colors.white54, fontSize: 12),
+                          ),
+                          const SizedBox(height: 20),
 
-                      if (_error != null)
-                        Container(
-                          width: double.infinity,
-                          padding: const EdgeInsets.all(10),
-                          margin: const EdgeInsets.only(bottom: 12),
-                          decoration: BoxDecoration(
-                            color: Colors.red.shade900.withValues(alpha: 0.5),
-                            borderRadius: BorderRadius.circular(10),
-                            border: Border.all(color: Colors.redAccent),
-                          ),
-                          child: Text(
-                            _error!,
-                            style: const TextStyle(color: Colors.white, fontSize: 12),
-                            textAlign: TextAlign.center,
-                          ),
-                        ),
-
-                      TextField(
-                        controller: _usernameCtrl,
-                        style: const TextStyle(color: Colors.white),
-                        decoration: InputDecoration(
-                          labelText: 'Kullanıcı Adı',
-                          labelStyle: const TextStyle(color: Colors.white70),
-                          prefixIcon: const Icon(Icons.person, color: Color(0xFFD4AF37)),
-                          filled: true,
-                          fillColor: Colors.black26,
-                          border: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(height: 12),
-                      TextField(
-                        controller: _passwordCtrl,
-                        obscureText: true,
-                        style: const TextStyle(color: Colors.white),
-                        decoration: InputDecoration(
-                          labelText: 'Şifre',
-                          labelStyle: const TextStyle(color: Colors.white70),
-                          prefixIcon: const Icon(Icons.lock, color: Color(0xFFD4AF37)),
-                          filled: true,
-                          fillColor: Colors.black26,
-                          border: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                        ),
-                        onSubmitted: (_) => _handleLogin(),
-                      ),
-                      const SizedBox(height: 16),
-                      SizedBox(
-                        width: double.infinity,
-                        height: 46,
-                        child: ElevatedButton(
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: const Color(0xFFD4AF37),
-                            foregroundColor: Colors.black,
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(12),
+                          if (_error != null)
+                            Container(
+                              width: double.infinity,
+                              padding: const EdgeInsets.all(12),
+                              margin: const EdgeInsets.only(bottom: 16),
+                              decoration: BoxDecoration(
+                                color: Colors.red.shade900.withValues(alpha: 0.55),
+                                borderRadius: BorderRadius.circular(12),
+                                border: Border.all(color: Colors.redAccent),
+                              ),
+                              child: Row(
+                                children: [
+                                  const Icon(
+                                    Icons.error_outline,
+                                    color: Colors.redAccent,
+                                    size: 18,
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Expanded(
+                                    child: Text(
+                                      _error!,
+                                      style: const TextStyle(
+                                        color: Colors.white,
+                                        fontSize: 12.5,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
                             ),
-                          ),
-                          onPressed: _loading ? null : _handleLogin,
-                          child: _loading
-                              ? const SizedBox(
-                                  width: 22,
-                                  height: 22,
-                                  child: CircularProgressIndicator(
-                                    strokeWidth: 2.5,
-                                    color: Colors.black,
-                                  ),
-                                )
-                              : const Text(
-                                  'SALONA GİRİŞ YAP',
-                                  style: TextStyle(
-                                    fontWeight: FontWeight.w900,
-                                    fontSize: 15,
-                                    letterSpacing: 1.1,
-                                  ),
+
+                          TextField(
+                            controller: _usernameCtrl,
+                            textInputAction: TextInputAction.next,
+                            style: const TextStyle(color: Colors.white, fontSize: 15),
+                            decoration: InputDecoration(
+                              labelText: 'Kullanıcı Adı',
+                              labelStyle: const TextStyle(color: Colors.white70),
+                              prefixIcon: const Icon(
+                                Icons.person_outline,
+                                color: Color(0xFFD4AF37),
+                              ),
+                              filled: true,
+                              fillColor: Colors.black26,
+                              enabledBorder: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(14),
+                                borderSide: const BorderSide(color: Colors.white24),
+                              ),
+                              focusedBorder: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(14),
+                                borderSide: const BorderSide(
+                                  color: Color(0xFFD4AF37),
+                                  width: 1.8,
                                 ),
-                        ),
-                      ),
-                      const SizedBox(height: 12),
-                      Wrap(
-                        spacing: 8,
-                        alignment: WrapAlignment.center,
-                        children: [
-                          ActionChip(
-                            backgroundColor: const Color(0xFF143D2B),
-                            label: const Text(
-                              '👑 Admin',
-                              style: TextStyle(color: Color(0xFFFDE047), fontSize: 11),
+                              ),
                             ),
-                            onPressed: () {
-                              _usernameCtrl.text = 'admin';
-                              _passwordCtrl.text = 'admin123456';
-                            },
                           ),
-                          ActionChip(
-                            backgroundColor: const Color(0xFF143D2B),
-                            label: const Text(
-                              '🦁 Oyuncu 1',
-                              style: TextStyle(color: Colors.white, fontSize: 11),
+                          const SizedBox(height: 16),
+
+                          TextField(
+                            controller: _passwordCtrl,
+                            obscureText: _obscurePassword,
+                            textInputAction: TextInputAction.done,
+                            style: const TextStyle(color: Colors.white, fontSize: 15),
+                            decoration: InputDecoration(
+                              labelText: 'Şifre',
+                              labelStyle: const TextStyle(color: Colors.white70),
+                              prefixIcon: const Icon(
+                                Icons.lock_outline,
+                                color: Color(0xFFD4AF37),
+                              ),
+                              suffixIcon: IconButton(
+                                onPressed: () {
+                                  setState(() => _obscurePassword = !_obscurePassword);
+                                },
+                                icon: Icon(
+                                  _obscurePassword
+                                      ? Icons.visibility_off_outlined
+                                      : Icons.visibility_outlined,
+                                  color: Colors.white60,
+                                ),
+                              ),
+                              filled: true,
+                              fillColor: Colors.black26,
+                              enabledBorder: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(14),
+                                borderSide: const BorderSide(color: Colors.white24),
+                              ),
+                              focusedBorder: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(14),
+                                borderSide: const BorderSide(
+                                  color: Color(0xFFD4AF37),
+                                  width: 1.8,
+                                ),
+                              ),
                             ),
-                            onPressed: () {
-                              _usernameCtrl.text = 'oyuncu1';
-                              _passwordCtrl.text = '123456';
-                            },
+                            onSubmitted: (_) => _handleLogin(),
                           ),
-                          ActionChip(
-                            backgroundColor: const Color(0xFF143D2B),
-                            label: const Text(
-                              '👸 Oyuncu 2',
-                              style: TextStyle(color: Colors.white, fontSize: 11),
+                          const SizedBox(height: 10),
+
+                          Row(
+                            children: [
+                              Checkbox(
+                                value: _rememberMe,
+                                activeColor: const Color(0xFFD4AF37),
+                                checkColor: Colors.black,
+                                onChanged: (v) {
+                                  setState(() => _rememberMe = v ?? true);
+                                },
+                              ),
+                              GestureDetector(
+                                onTap: () {
+                                  setState(() => _rememberMe = !_rememberMe);
+                                },
+                                child: const Text(
+                                  'Beni Hatırla',
+                                  style: TextStyle(color: Colors.white70, fontSize: 13),
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 14),
+
+                          SizedBox(
+                            width: double.infinity,
+                            height: 52,
+                            child: ElevatedButton(
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: const Color(0xFFD4AF37),
+                                foregroundColor: Colors.black,
+                                elevation: 6,
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(14),
+                                ),
+                              ),
+                              onPressed: _loading ? null : _handleLogin,
+                              child: _loading
+                                  ? const SizedBox(
+                                      width: 24,
+                                      height: 24,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2.6,
+                                        color: Colors.black,
+                                      ),
+                                    )
+                                  : const Text(
+                                      'OYUN SALONUNA GİR',
+                                      style: TextStyle(
+                                        fontWeight: FontWeight.w900,
+                                        fontSize: 15.5,
+                                        letterSpacing: 1.2,
+                                      ),
+                                    ),
                             ),
-                            onPressed: () {
-                              _usernameCtrl.text = 'oyuncu2';
-                              _passwordCtrl.text = '123456';
-                            },
                           ),
                         ],
                       ),
-                    ],
-                  ),
+                    ),
+
+                    const SizedBox(height: 28),
+                    const Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(Icons.verified_user, color: Color(0xFFD4AF37), size: 15),
+                        SizedBox(width: 6),
+                        Text(
+                          'Güvenli Kulüp Bağlantısı  •  v1.0',
+                          style: TextStyle(color: Colors.white54, fontSize: 12),
+                        ),
+                      ],
+                    ),
+                  ],
                 ),
               ),
             ),
-          ],
+          ),
         ),
       ),
     );

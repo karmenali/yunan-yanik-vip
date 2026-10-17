@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import '../models/game_models.dart';
 import '../services/game_service.dart';
 import '../services/sound_fx.dart';
@@ -29,6 +30,13 @@ class _TableScreenState extends State<TableScreen> {
   @override
   void initState() {
     super.initState();
+    // Oyun masası açıldığında tam ekran Yatay (Landscape) moda geç
+    SystemChrome.setPreferredOrientations([
+      DeviceOrientation.landscapeLeft,
+      DeviceOrientation.landscapeRight,
+    ]);
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+
     GameService.instance.addListener(_onServiceUpdate);
 
     _effectSub = GameService.instance.effectStreamController.stream.listen((eff) {
@@ -76,6 +84,11 @@ class _TableScreenState extends State<TableScreen> {
     _effectSub?.cancel();
     _toastSub?.cancel();
     GameService.instance.removeListener(_onServiceUpdate);
+    // Masadan çıkılırken Lobi için tekrar Dikey (Portrait) moda dön
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    SystemChrome.setPreferredOrientations([
+      DeviceOrientation.portraitUp,
+    ]);
     super.dispose();
   }
 
@@ -614,15 +627,18 @@ class _TableScreenState extends State<TableScreen> {
             ),
             const SizedBox(width: 10),
 
-            Text(
-              table.name,
-              style: const TextStyle(
-                color: Colors.white,
-                fontWeight: FontWeight.bold,
-                fontSize: 14,
+            Flexible(
+              child: Text(
+                table.name,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.bold,
+                  fontSize: 13.5,
+                ),
               ),
             ),
-            const SizedBox(width: 10),
+            const SizedBox(width: 8),
 
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
