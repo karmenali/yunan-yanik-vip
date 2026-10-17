@@ -10,7 +10,7 @@ class GameService extends ChangeNotifier {
   static final GameService instance = GameService._internal();
   GameService._internal();
 
-  String _serverUrl = 'http://10.0.2.2:4545'; // Varsayılan; giriş ekranından Linux sunucu IP'si girilebilir
+  String _serverUrl = 'http://217.76.62.249:4545'; // Canlı Linux Oyun Sunucusu
   String? _token;
   UserModel? currentUser;
   int emojiCost = 10;
