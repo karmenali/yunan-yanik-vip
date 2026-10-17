@@ -126,9 +126,27 @@ export class TableManager {
     }
   }
 
+  private cleanupTableIfEmpty(tableId: string): boolean {
+    const table = this.tables.get(tableId);
+    if (!table) return false;
+    // Kulübün 3 varsayılan salon masası her zaman açık kalır, oyuncuların kurduğu masalar boşalınca silinir
+    if (table.hostUserId === 'system') return false;
+
+    const hasSeated = table.seats.some((s) => s !== null && s.isConnected);
+    const hasSpectators = table.spectators.size > 0;
+
+    if (!hasSeated && !hasSpectators) {
+      if (table.turnTimer) clearTimeout(table.turnTimer);
+      if (table.phaseTimer) clearTimeout(table.phaseTimer);
+      this.tables.delete(tableId);
+      return true;
+    }
+    return false;
+  }
+
   handleDisconnect(userId: string) {
     this.userSockets.delete(userId);
-    for (const table of this.tables.values()) {
+    for (const table of Array.from(this.tables.values())) {
       table.spectators.delete(userId);
       let updated = false;
       for (let i = 0; i < table.seats.length; i++) {
@@ -142,8 +160,9 @@ export class TableManager {
           updated = true;
         }
       }
-      if (updated) {
-        this.broadcastTableState(table.id);
+      const deleted = this.cleanupTableIfEmpty(table.id);
+      if (updated || deleted) {
+        if (!deleted) this.broadcastTableState(table.id);
         this.broadcastLobbyTables();
       }
     }
@@ -259,7 +278,10 @@ export class TableManager {
       }
     }
 
-    this.broadcastTableState(tableId);
+    const deleted = this.cleanupTableIfEmpty(tableId);
+    if (!deleted) {
+      this.broadcastTableState(tableId);
+    }
     this.broadcastLobbyTables();
   }
 
@@ -308,6 +330,13 @@ export class TableManager {
       table.status = 'waiting';
       table.lastWinnerInfo = null;
       table.lastShowdown = null;
+      for (const s of table.seats) {
+        if (s) {
+          s.isEliminated = false;
+          s.totalScore = 0;
+          s.hand = [];
+        }
+      }
     }
 
     this.broadcastTableState(tableId);
@@ -342,6 +371,19 @@ export class TableManager {
     const user = await db.getUserById(userId);
     if (!user || user.credits < table.entryFee) {
       throw new Error(`Oyuna başlamak için ${table.entryFee} kredi gereklidir.`);
+    }
+
+    if (table.status === 'finished') {
+      table.status = 'waiting';
+      table.lastWinnerInfo = null;
+      table.lastShowdown = null;
+      for (const s of table.seats) {
+        if (s) {
+          s.isEliminated = false;
+          s.totalScore = 0;
+          s.hand = [];
+        }
+      }
     }
 
     seat.isReady = !seat.isReady;

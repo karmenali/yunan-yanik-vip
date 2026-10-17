@@ -5,6 +5,7 @@ import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:socket_io_client/socket_io_client.dart' as io;
 import '../models/game_models.dart';
+import 'sound_fx.dart';
 
 class GameService extends ChangeNotifier {
   static final GameService instance = GameService._internal();
@@ -20,6 +21,7 @@ class GameService extends ChangeNotifier {
 
   List<LobbyTableModel> lobbyTables = [];
   TableStateModel? activeTable;
+  String? lastDrawnCardId;
   List<Map<String, dynamic>> tableChatMessages = [];
   String? activeVoiceSpeakerUsername;
 
@@ -33,6 +35,7 @@ class GameService extends ChangeNotifier {
   bool get isLoggedIn => _token != null && currentUser != null;
 
   Future<void> init() async {
+    await SoundFx.init();
     final prefs = await SharedPreferences.getInstance();
     final savedUrl = prefs.getString('server_url');
     if (savedUrl != null && savedUrl.isNotEmpty) {
@@ -85,6 +88,7 @@ class GameService extends ChangeNotifier {
     _token = null;
     currentUser = null;
     activeTable = null;
+    lastDrawnCardId = null;
     lobbyTables = [];
     isSocketConnected = false;
     notifyListeners();
@@ -129,7 +133,23 @@ class GameService extends ChangeNotifier {
 
     _socket!.on('table_state', (data) {
       if (data is Map) {
-        activeTable = TableStateModel.fromJson(Map<String, dynamic>.from(data));
+        final prevIds = activeTable?.myHand.map((c) => c.id).toSet() ?? <String>{};
+        final nextTable = TableStateModel.fromJson(Map<String, dynamic>.from(data));
+
+        // Yeni çekilen 11. kağıdı tespit et (vurgulama ve akıcı animasyon için)
+        if (nextTable.myHand.length == 11 && prevIds.length == 10) {
+          for (final c in nextTable.myHand) {
+            if (!prevIds.contains(c.id)) {
+              lastDrawnCardId = c.id;
+              SoundFx.playCardDraw();
+              break;
+            }
+          }
+        } else if (nextTable.myHand.length <= 10) {
+          lastDrawnCardId = null;
+        }
+
+        activeTable = nextTable;
         notifyListeners();
       }
     });
@@ -178,7 +198,26 @@ class GameService extends ChangeNotifier {
     _socket!.on('voice_ptt_stream', (data) {
       if (data is Map) {
         final speaking = data['isSpeaking'] == true;
-        activeVoiceSpeakerUsername = speaking ? data['username']?.toString() : null;
+        final speakerName = data['username']?.toString();
+        final senderId = data['userId']?.toString();
+        final audioB64 = data['audioBase64']?.toString();
+
+        activeVoiceSpeakerUsername = speaking ? speakerName : null;
+
+        // Başka bir oyuncudan gelen ses kaydını hoparlörden çal!
+        if (audioB64 != null &&
+            audioB64.isNotEmpty &&
+            senderId != currentUser?.id) {
+          activeVoiceSpeakerUsername = speakerName;
+          SoundFx.playIncomingVoiceBase64(audioB64);
+          Future.delayed(const Duration(seconds: 3), () {
+            if (activeVoiceSpeakerUsername == speakerName) {
+              activeVoiceSpeakerUsername = null;
+              notifyListeners();
+            }
+          });
+        }
+
         notifyListeners();
       }
     });
@@ -203,7 +242,7 @@ class GameService extends ChangeNotifier {
 
     _socket!.on('table_closed', (data) {
       activeTable = null;
-      toastStreamController.add('Masa yönetici tarafından kapatıldı.');
+      toastStreamController.add('Masa kapatıldı.');
       notifyListeners();
     });
 
@@ -228,6 +267,19 @@ class GameService extends ChangeNotifier {
       currentUser!.avatar = avatarKey;
       notifyListeners();
     }
+  }
+
+  Future<Map<String, dynamic>> fetchMyHistory() async {
+    final uri = Uri.parse('$_serverUrl/api/profile/history');
+    final res = await http.get(
+      uri,
+      headers: {'Authorization': 'Bearer $_token'},
+    );
+    final data = jsonDecode(res.body);
+    if (res.statusCode != 200) {
+      throw Exception(data['error'] ?? 'Geçmiş verileri alınamadı.');
+    }
+    return Map<String, dynamic>.from(data);
   }
 
   // ==========================================
@@ -260,6 +312,7 @@ class GameService extends ChangeNotifier {
 
   void enterTable(String tableId) {
     tableChatMessages.clear();
+    lastDrawnCardId = null;
     _socket?.emit('join_table', {'tableId': tableId});
   }
 
@@ -267,6 +320,7 @@ class GameService extends ChangeNotifier {
     if (activeTable != null) {
       _socket?.emit('leave_table', {'tableId': activeTable!.id});
       activeTable = null;
+      lastDrawnCardId = null;
       tableChatMessages.clear();
       notifyListeners();
     }
@@ -297,6 +351,7 @@ class GameService extends ChangeNotifier {
 
   void discardCard(String cardId) {
     if (activeTable == null) return;
+    SoundFx.playCardDiscard();
     _socket?.emit('discard_card', {
       'tableId': activeTable!.id,
       'cardId': cardId,
@@ -305,6 +360,7 @@ class GameService extends ChangeNotifier {
 
   void declareFinish({String? discardCardId}) {
     if (activeTable == null) return;
+    SoundFx.playCelebration();
     _socket?.emit('declare_finish', {
       'tableId': activeTable!.id,
       'discardCardId': discardCardId,
@@ -341,11 +397,29 @@ class GameService extends ChangeNotifier {
     });
   }
 
-  void setVoicePushToTalk(bool isSpeaking) {
+  /// Bas-Konuş başlat: Mikrofondan gerçek ses kaydına başlar
+  Future<bool> startVoicePushToTalk() async {
+    if (activeTable == null) return false;
+    final started = await SoundFx.startPttRecording();
+    if (started) {
+      _socket?.emit('voice_ptt', {
+        'tableId': activeTable!.id,
+        'isSpeaking': true,
+      });
+    } else {
+      toastStreamController.add('🎙️ Mikrofon izni gerekli veya sesli sohbet kapalı.');
+    }
+    return started;
+  }
+
+  /// Bas-Konuş bırak: Kaydedilen sesi masadaki tüm oyunculara gönderir ve hoparlörden çaldırır
+  Future<void> stopVoicePushToTalk() async {
     if (activeTable == null) return;
+    final audioB64 = await SoundFx.stopPttRecordingAndGetBase64();
     _socket?.emit('voice_ptt', {
       'tableId': activeTable!.id,
-      'isSpeaking': isSpeaking,
+      'isSpeaking': false,
+      'audioBase64': audioB64,
     });
   }
 

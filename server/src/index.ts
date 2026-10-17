@@ -152,6 +152,30 @@ app.post('/api/profile/avatar', requireAuth, async (req, res) => {
   }
 });
 
+// Oyuncu Kendi Oyun ve Kredi Hareketleri Geçmişi
+app.get('/api/profile/history', requireAuth, async (req, res) => {
+  try {
+    const jwtUser = (req as any).user as JwtPayload;
+    const transactions = await db.getUserTransactions(jwtUser.userId, 80);
+    const totalWins = transactions.filter((t) => t.type === 'table_win').length;
+    const totalEntries = transactions.filter((t) => t.type === 'table_entry').length;
+    const totalWonCredits = transactions
+      .filter((t) => t.type === 'table_win')
+      .reduce((acc, t) => acc + t.amount, 0);
+
+    res.json({
+      transactions,
+      stats: {
+        totalGames: totalEntries,
+        totalWins,
+        totalWonCredits,
+      },
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ==========================================
 // 👑 UYGULAMA İÇİ ADMİN PANELİ ENDPOINTLERİ
 // ==========================================
@@ -462,11 +486,11 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Bas-Konuş (Push-To-Talk) Sesli Sohbet Yayını
+  // Bas-Konuş (Push-To-Talk) Sesli Sohbet Yayını (Telsiz / Walkie-Talkie)
   socket.on('voice_ptt', (data) => {
     const tableId = String(data?.tableId || '');
     if (!tableId) return;
-    socket.to(`table:${tableId}`).emit('voice_ptt_stream', {
+    io.to(`table:${tableId}`).emit('voice_ptt_stream', {
       userId: user.userId,
       username: user.username,
       isSpeaking: Boolean(data?.isSpeaking),

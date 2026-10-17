@@ -404,6 +404,25 @@ class DatabaseService {
     }));
   }
 
+  async getUserTransactions(userId: string, limit = 60): Promise<CreditTransaction[]> {
+    if (this.useMemory || !this.pool) {
+      return this.memTransactions.filter((t) => t.user_id === userId).slice(0, limit);
+    }
+    const res = await this.pool.query(
+      'SELECT * FROM credit_transactions WHERE user_id = $1 ORDER BY created_at DESC LIMIT $2',
+      [userId, limit]
+    );
+    return res.rows.map((r) => ({
+      id: r.id,
+      user_id: r.user_id,
+      username: r.username,
+      amount: Number(r.amount),
+      type: r.type,
+      description: r.description,
+      created_at: new Date(r.created_at).toISOString(),
+    }));
+  }
+
   private mapUserRow(row: any): UserRecord {
     return {
       id: row.id,
