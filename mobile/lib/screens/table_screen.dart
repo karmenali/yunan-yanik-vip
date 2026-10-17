@@ -16,16 +16,26 @@ class TableScreen extends StatefulWidget {
 }
 
 class _TableScreenState extends State<TableScreen> {
+  // 60 FPS Sıfır Gecikmeli Yerel Kart Listesi ve Sürükleme Durumu
+  List<CardModel> _localHand = [];
   String? _selectedCardId;
-  int? _draggingIndex;
-  double _dragAccumulatedDx = 0;
+  String? _draggingCardId;
+  double _dragFingerX = 0;
 
   bool _showScoreboardModal = false;
   bool _showChatDrawer = false;
   bool _dismissedWinnerModal = false;
   String? _lastSeenWinnerId;
 
-  bool _isPttPressed = false;
+  // Sesli Sohbet (Hem Basılı Tut-Konuş hem Dokun-Konuş desteği)
+  bool _isVoiceRecording = false;
+  DateTime? _pttDownTime;
+  Timer? _pttAutoStopTimer;
+  int _recordingSeconds = 0;
+  Timer? _recordingTickTimer;
+
+  // Canlı Sayaç (Sunucu + Yerel Saniyelik Akıcı Senkronizasyon)
+  Timer? _localSecondTicker;
   int _lastBeepSecond = -1;
 
   String? _toastBanner;
@@ -39,7 +49,6 @@ class _TableScreenState extends State<TableScreen> {
   @override
   void initState() {
     super.initState();
-    // Kullanıcının talebi üzerine Yunan Yanık masası da Batak HD gibi DİKEY (Portrait) modda çalışır
     SystemChrome.setPreferredOrientations([
       DeviceOrientation.portraitUp,
       DeviceOrientation.portraitDown,
@@ -48,6 +57,17 @@ class _TableScreenState extends State<TableScreen> {
 
     final gs = GameService.instance;
     gs.addListener(_onGameUpdate);
+    _syncLocalHandFromServer();
+
+    // Yerel 1 saniyelik sayaç: Sunucu paketi gecikse bile ekran sayacının asla donmamasını garanti eder
+    _localSecondTicker = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted) return;
+      final table = gs.activeTable;
+      if (table != null &&
+          (table.status == 'playing' || table.status == 'round_summary')) {
+        setState(() {});
+      }
+    });
 
     _toastSub = gs.toastStreamController.stream.listen((msg) {
       if (!mounted) return;
@@ -73,6 +93,9 @@ class _TableScreenState extends State<TableScreen> {
   @override
   void dispose() {
     GameService.instance.removeListener(_onGameUpdate);
+    _localSecondTicker?.cancel();
+    _pttAutoStopTimer?.cancel();
+    _recordingTickTimer?.cancel();
     _toastSub?.cancel();
     _effectSub?.cancel();
     _toastTimer?.cancel();
@@ -80,9 +103,28 @@ class _TableScreenState extends State<TableScreen> {
     super.dispose();
   }
 
+  void _syncLocalHandFromServer() {
+    final table = GameService.instance.activeTable;
+    if (table == null) {
+      _localHand = [];
+      return;
+    }
+    // Kullanıcı şu an parmağıyla kart sürüklüyorsa ve kart sayısı değişmediyse
+    // parmağın altındaki sırayı bozma!
+    if (_draggingCardId != null &&
+        _localHand.length == table.myHand.length &&
+        _localHand.map((c) => c.id).toSet().containsAll(
+              table.myHand.map((c) => c.id),
+            )) {
+      return;
+    }
+    _localHand = List<CardModel>.from(table.myHand);
+  }
+
   void _onGameUpdate() {
     if (!mounted) return;
     final table = GameService.instance.activeTable;
+    _syncLocalHandFromServer();
 
     // Son 5 saniye sesli geri sayım uyarısı
     if (table != null && table.status == 'playing') {
@@ -95,8 +137,7 @@ class _TableScreenState extends State<TableScreen> {
       }
     }
 
-    // Yeni bir şampiyon bilgisi geldiyse modalı tekrar göster
-    final winnerId = table?.lastWinnerInfo?['winnerId']?.toString();
+    final winnerId = table?.lastWinnerInfo?['userId']?.toString();
     if (winnerId != _lastSeenWinnerId) {
       _lastSeenWinnerId = winnerId;
       _dismissedWinnerModal = false;
@@ -105,27 +146,82 @@ class _TableScreenState extends State<TableScreen> {
   }
 
   void _leaveTable() {
+    if (_isVoiceRecording) {
+      _stopVoiceRecording();
+    }
     GameService.instance.leaveCurrentTable();
     Navigator.of(context).pop();
   }
 
-  void _swapLocalHandCards(
-    List<CardModel> hand,
-    int fromIndex,
-    int toIndex,
-  ) {
-    if (fromIndex < 0 ||
-        toIndex < 0 ||
-        fromIndex >= hand.length ||
-        toIndex >= hand.length ||
-        fromIndex == toIndex) {
+  // ===========================================================================
+  // 🎙️ KESİNTİSİZ TELSİZ SESLİ SOHBET (BASILI TUT VEYA DOKUN-KONUŞ)
+  // ===========================================================================
+  Future<void> _onMicPointerDown() async {
+    _pttDownTime = DateTime.now();
+    if (_isVoiceRecording) {
+      // Zaten dokun-konuş modunda açıksa, ikinci dokunuşta kaydı bitir ve gönder!
+      await _stopVoiceRecording();
       return;
     }
-    final item = hand.removeAt(fromIndex);
-    hand.insert(toIndex, item);
-    GameService.instance.reorderHand(
-      orderedCardIds: hand.map((c) => c.id).toList(),
-    );
+
+    final started = await GameService.instance.startVoicePushToTalk();
+    if (!mounted) return;
+    if (started) {
+      _pttAutoStopTimer?.cancel();
+      _recordingTickTimer?.cancel();
+      setState(() {
+        _isVoiceRecording = true;
+        _recordingSeconds = 0;
+      });
+      _recordingTickTimer =
+          Timer.periodic(const Duration(seconds: 1), (timer) {
+        if (!mounted || !_isVoiceRecording) {
+          timer.cancel();
+          return;
+        }
+        setState(() => _recordingSeconds += 1);
+      });
+      // Maksimum 8 saniye sonra otomatik gönder
+      _pttAutoStopTimer = Timer(const Duration(seconds: 8), () {
+        if (_isVoiceRecording) {
+          _stopVoiceRecording();
+        }
+      });
+    }
+  }
+
+  Future<void> _onMicPointerUp() async {
+    if (!_isVoiceRecording || _pttDownTime == null) return;
+    final heldMs = DateTime.now().difference(_pttDownTime!).inMilliseconds;
+    // Eğer kullanıcı 400ms'den uzun basılı tuttuysa (Bas-Konuş), parmağını çekince hemen gönder.
+    // Eğer 400ms'den kısa dokunduysa (Dokun-Konuş), kayda devam etsin (tekrar dokununca veya 5 sn sonra gönderecek)!
+    if (heldMs >= 400) {
+      await _stopVoiceRecording();
+    } else {
+      _pttAutoStopTimer?.cancel();
+      _pttAutoStopTimer = Timer(const Duration(seconds: 5), () {
+        if (_isVoiceRecording) {
+          _stopVoiceRecording();
+        }
+      });
+    }
+  }
+
+  Future<void> _stopVoiceRecording() async {
+    _pttAutoStopTimer?.cancel();
+    _recordingTickTimer?.cancel();
+    if (!_isVoiceRecording) return;
+    setState(() {
+      _isVoiceRecording = false;
+      _recordingSeconds = 0;
+    });
+    await GameService.instance.stopVoicePushToTalk();
+  }
+
+  String _formatDuration(int totalSeconds) {
+    final mins = (totalSeconds ~/ 60).toString().padLeft(2, '0');
+    final secs = (totalSeconds % 60).toString().padLeft(2, '0');
+    return '$mins:$secs';
   }
 
   @override
@@ -143,7 +239,7 @@ class _TableScreenState extends State<TableScreen> {
               const CircularProgressIndicator(color: Color(0xFFF59E0B)),
               const SizedBox(height: 16),
               const Text(
-                'Masa verisi yükleniyor...',
+                'Masa hazırlanıyor...',
                 style: TextStyle(color: Colors.white70, fontSize: 14),
               ),
               const SizedBox(height: 16),
@@ -177,93 +273,137 @@ class _TableScreenState extends State<TableScreen> {
     final hasDrawn = table.hasDrawnThisTurn;
 
     return Scaffold(
-      backgroundColor: const Color(0xFF04140D),
+      backgroundColor: const Color(0xFF06140E),
       body: Stack(
         children: [
-          // 1. ZÜMRÜT YEŞİLİ VIP ÇUHA ARKA PLAN (DİKEY BATAK HD STİLİ)
+          // 1. ZYNGA 3D MAUN & ZÜMRÜT ÇUHA MASA ARKA PLAN GÖRSELİ (table_bg.jpg)
           Positioned.fill(
-            child: Container(
-              decoration: const BoxDecoration(
-                gradient: RadialGradient(
-                  center: Alignment(0, -0.18),
-                  radius: 1.05,
+            child: Image.asset(
+              'assets/images/table_bg.jpg',
+              fit: BoxFit.cover,
+              alignment: const Alignment(0, -0.15),
+            ),
+          ),
+
+          // Hafif karanlık atmosferik çerçeve geçişi (okunabilirliği artırır)
+          Positioned.fill(
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
                   colors: [
-                    Color(0xFF0F5438),
-                    Color(0xFF083523),
-                    Color(0xFF04180F),
+                    Colors.black.withValues(alpha: 0.45),
+                    Colors.transparent,
+                    Colors.black.withValues(alpha: 0.72),
                   ],
+                  stops: const [0.0, 0.48, 1.0],
                 ),
               ),
             ),
           ),
 
-          // 2. ANA DİKEY MASA DÜZENİ
+          // 2. ANA DİKEY ZYNGA MASA DÜZENİ
           SafeArea(
             child: Column(
               children: [
-                // ÜST BAR (Lobiye Dön, Masa & Pot, 101 Tablo, Ses Ayarı, Bas-Konuş)
-                _buildTopBar(table, gs),
+                // ÜST VIP BAR + MAÇ SÜRESİ & CANLI SAYAÇ BANNERI
+                _buildZyngaTopBar(table, gs),
 
-                // RAKİPLER VE ORTA ÇUHA ALANI
+                // ORTA CASINO MASASI (Koltuklar, Altın Fişler, Gösterge Jokeri, Deste ve Atılan Kağıt)
                 Expanded(
-                  flex: 47,
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 8,
-                      vertical: 4,
-                    ),
-                    child: Column(
-                      children: [
-                        // Rakip Koltukları (2-6 Kişilik Dikey Uyumlu Grid)
-                        Expanded(
-                          child: _buildOpponentsArea(
-                            seats,
-                            mySeatIdx,
-                            table,
-                            gs,
-                          ),
-                        ),
-
-                        const SizedBox(height: 4),
-
-                        // ORTA MASA MERKEZİ (Gösterge Jokeri + Kapalı Deste + Atılan Kağıt)
-                        _buildCenterFeltArea(
-                          table,
-                          isMyTurn,
-                          hasDrawn,
-                          mySeatIdx,
-                          mySeat,
-                          isPlaying,
-                        ),
-                      ],
-                    ),
+                  flex: 56,
+                  child: _buildZyngaCasinoTableArea(
+                    table: table,
+                    seats: seats,
+                    mySeatIdx: mySeatIdx,
+                    mySeat: mySeat,
+                    isPlaying: isPlaying,
+                    isMyTurn: isMyTurn,
+                    hasDrawn: hasDrawn,
+                    gs: gs,
                   ),
                 ),
 
-                // ALT OYUNCU ELİ VE AKSİYON KONTROLLERİ (Batak HD Tarzı Büyük Kartlar)
+                // ALT OYUNCU ELİ (TEK SIRA GENİŞ YELPAZE + 60 FPS SÜRÜKLEME + 4 ZYNGA BUTONU)
                 Expanded(
-                  flex: 53,
-                  child: _buildBottomPlayerHandArea(
-                    gs,
-                    table,
-                    mySeat,
-                    mySeatIdx,
-                    isMyTurn,
-                    hasDrawn,
-                    isPlaying,
+                  flex: 44,
+                  child: _buildZyngaBottomHandAndControls(
+                    gs: gs,
+                    table: table,
+                    mySeat: mySeat,
+                    mySeatIdx: mySeatIdx,
+                    isMyTurn: isMyTurn,
+                    hasDrawn: hasDrawn,
+                    isPlaying: isPlaying,
                   ),
                 ),
               ],
             ),
           ),
 
-          // 3. UÇAN EFEKT KATMANI (Bomba, Domates, Gül vb.)
+          // 3. AKTİF SES KAYDI GÖSTERGESİ (Konuşurken Ekran Üstünde Parlayan Telsiz Barı)
+          if (_isVoiceRecording)
+            Positioned(
+              top: 98,
+              left: 24,
+              right: 24,
+              child: Center(
+                child: GestureDetector(
+                  onTap: _stopVoiceRecording,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 18,
+                      vertical: 10,
+                    ),
+                    decoration: BoxDecoration(
+                      gradient: const LinearGradient(
+                        colors: [Color(0xFFDC2626), Color(0xFF991B1B)],
+                      ),
+                      borderRadius: BorderRadius.circular(30),
+                      border: Border.all(
+                        color: const Color(0xFFFDE047),
+                        width: 1.8,
+                      ),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.redAccent.withValues(alpha: 0.65),
+                          blurRadius: 16,
+                          spreadRadius: 2,
+                        ),
+                      ],
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Icon(
+                          Icons.fiber_manual_record,
+                          color: Colors.white,
+                          size: 16,
+                        ),
+                        const SizedBox(width: 8),
+                        Text(
+                          '🎙️ SES KAYDEDİLİYOR (${_recordingSeconds}s) • Göndermek İçin Dokun / Bırak',
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontWeight: FontWeight.w900,
+                            fontSize: 11.5,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+
+          // 4. UÇAN EFEKT KATMANI
           ..._floatingEffects.map((eff) => _buildFloatingEffectOverlay(eff)),
 
-          // 4. BİLGİ / HATA BİLDİRİMİ (Üst Orta)
-          if (_toastBanner != null)
+          // 5. BİLGİ / HATA BİLDİRİMİ
+          if (_toastBanner != null && !_isVoiceRecording)
             Positioned(
-              top: 66,
+              top: 96,
               left: 20,
               right: 20,
               child: Center(
@@ -272,14 +412,14 @@ class _TableScreenState extends State<TableScreen> {
                   child: Container(
                     padding: const EdgeInsets.symmetric(
                       horizontal: 16,
-                      vertical: 10,
+                      vertical: 9,
                     ),
                     decoration: BoxDecoration(
                       color: const Color(0xFF0A2418).withValues(alpha: 0.96),
-                      borderRadius: BorderRadius.circular(14),
+                      borderRadius: BorderRadius.circular(20),
                       border: Border.all(color: const Color(0xFFF59E0B)),
                       boxShadow: const [
-                        BoxShadow(color: Colors.black54, blurRadius: 12),
+                        BoxShadow(color: Colors.black87, blurRadius: 12),
                       ],
                     ),
                     child: Row(
@@ -288,7 +428,7 @@ class _TableScreenState extends State<TableScreen> {
                         const Icon(
                           Icons.notifications_active,
                           color: Color(0xFFFBBF24),
-                          size: 18,
+                          size: 16,
                         ),
                         const SizedBox(width: 8),
                         Flexible(
@@ -301,15 +441,6 @@ class _TableScreenState extends State<TableScreen> {
                             ),
                           ),
                         ),
-                        const SizedBox(width: 6),
-                        GestureDetector(
-                          onTap: () => setState(() => _toastBanner = null),
-                          child: const Icon(
-                            Icons.close,
-                            color: Colors.white70,
-                            size: 16,
-                          ),
-                        ),
                       ],
                     ),
                   ),
@@ -317,17 +448,17 @@ class _TableScreenState extends State<TableScreen> {
               ),
             ),
 
-          // 5. EL SONU / 101 PUAN TABLOSU MODALI (Profesyonel Çizelge)
+          // 6. EL SONU / 101 PUAN TABLOSU MODALI
           if (_showScoreboardModal || isRoundEnd)
             _buildScoreboardOverlay(table, mySeat, mySeatIdx, isRoundEnd),
 
-          // 6. MAÇ SONU ŞAMPİYON EKRANI (Kapatılabilir & Koltuk Seçimini Engellemez)
+          // 7. MAÇ SONU ŞAMPİYON EKRANI
           if (isFinished &&
               table.lastWinnerInfo != null &&
               !_dismissedWinnerModal)
             _buildMatchFinishedOverlay(table, mySeatIdx),
 
-          // 7. SOHBET ÇEKMECESİ
+          // 8. SOHBET ÇEKMECESİ
           if (_showChatDrawer) _buildChatDrawer(gs),
         ],
       ),
@@ -335,292 +466,480 @@ class _TableScreenState extends State<TableScreen> {
   }
 
   // ===========================================================================
-  // 1. ÜST BAR (DİKEY EKRAN UYUMLU)
+  // 1. ZYNGA ÜST VIP BAR + TRAPEZOİD MAÇ SÜRESİ SAYACI (MATCH 09:05)
   // ===========================================================================
-  Widget _buildTopBar(TableStateModel table, GameService gs) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-      decoration: BoxDecoration(
-        color: Colors.black.withValues(alpha: 0.50),
-        border: Border(
-          bottom: BorderSide(
-            color: const Color(0xFFF59E0B).withValues(alpha: 0.25),
-          ),
-        ),
-      ),
-      child: Row(
-        children: [
-          // Çıkış Butonu
-          InkWell(
-            onTap: _leaveTable,
-            borderRadius: BorderRadius.circular(10),
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
-              decoration: BoxDecoration(
-                color: Colors.redAccent.withValues(alpha: 0.18),
-                borderRadius: BorderRadius.circular(10),
-                border: Border.all(
-                  color: Colors.redAccent.withValues(alpha: 0.45),
-                ),
-              ),
-              child: const Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(
-                    Icons.arrow_back_ios_new,
-                    color: Colors.redAccent,
-                    size: 13,
-                  ),
-                  SizedBox(width: 3),
-                  Text(
-                    'Lobi',
-                    style: TextStyle(
-                      color: Colors.redAccent,
-                      fontWeight: FontWeight.bold,
-                      fontSize: 11,
-                    ),
-                  ),
-                ],
+  Widget _buildZyngaTopBar(TableStateModel table, GameService gs) {
+    final matchTimeStr = _formatDuration(table.matchElapsedSeconds);
+    final isPlaying = table.status == 'playing';
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+          decoration: BoxDecoration(
+            gradient: const LinearGradient(
+              colors: [Color(0xFF1E130C), Color(0xFF2D1B10), Color(0xFF1E130C)],
+            ),
+            border: Border(
+              bottom: BorderSide(
+                color: const Color(0xFFD4AF37).withValues(alpha: 0.75),
+                width: 1.5,
               ),
             ),
+            boxShadow: const [
+              BoxShadow(color: Colors.black87, blurRadius: 8),
+            ],
           ),
-          const SizedBox(width: 7),
-
-          // Masa Bilgisi ve Ortadaki Ödül Havuzu
-          Expanded(
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-              decoration: BoxDecoration(
-                color: Colors.white.withValues(alpha: 0.06),
-                borderRadius: BorderRadius.circular(10),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    '${table.name} ${table.roundNumber > 0 ? '• El #${table.roundNumber}' : ''}',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontWeight: FontWeight.w800,
-                      fontSize: 11.5,
+          child: Row(
+            children: [
+              // Yuvarlak Altın Çerçeveli Geri Butonu (<)
+              InkWell(
+                onTap: _leaveTable,
+                borderRadius: BorderRadius.circular(20),
+                child: Container(
+                  width: 34,
+                  height: 34,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    gradient: const LinearGradient(
+                      colors: [Color(0xFF3E2723), Color(0xFF1B0F0D)],
+                    ),
+                    border: Border.all(
+                      color: const Color(0xFFD4AF37),
+                      width: 1.6,
                     ),
                   ),
-                  Row(
-                    children: [
-                      const Icon(
-                        Icons.emoji_events,
-                        color: Color(0xFFF59E0B),
-                        size: 12,
+                  child: const Icon(
+                    Icons.arrow_back_ios_new_rounded,
+                    color: Color(0xFFFDE047),
+                    size: 15,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 6),
+
+              // VIP Rozeti
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                decoration: BoxDecoration(
+                  gradient: const LinearGradient(
+                    colors: [Color(0xFF1E3A8A), Color(0xFF0F172A)],
+                  ),
+                  borderRadius: BorderRadius.circular(18),
+                  border: Border.all(
+                    color: const Color(0xFFD4AF37),
+                    width: 1.4,
+                  ),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Text('👑', style: TextStyle(fontSize: 12)),
+                    const SizedBox(width: 4),
+                    ConstrainedBox(
+                      constraints: const BoxConstraints(maxWidth: 85),
+                      child: Text(
+                        table.name,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: Color(0xFFFDE047),
+                          fontWeight: FontWeight.w900,
+                          fontSize: 11,
+                        ),
                       ),
-                      const SizedBox(width: 3),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 6),
+
+              // Masa Ödül Havuzu (Pot) Rozeti
+              Expanded(
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+                  decoration: BoxDecoration(
+                    color: Colors.black54,
+                    borderRadius: BorderRadius.circular(18),
+                    border: Border.all(
+                      color: const Color(0xFFD4AF37).withValues(alpha: 0.65),
+                    ),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Text('🪙', style: TextStyle(fontSize: 13)),
+                      const SizedBox(width: 4),
                       Flexible(
                         child: Text(
-                          'Ödül: ${table.pot} (${table.entryFee} G.)',
+                          '${table.pot > 0 ? table.pot : table.entryFee}',
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: const TextStyle(
-                            color: Color(0xFFFBBF24),
-                            fontWeight: FontWeight.w700,
-                            fontSize: 10.5,
+                            color: Colors.white,
+                            fontWeight: FontWeight.w900,
+                            fontSize: 12.5,
                           ),
                         ),
                       ),
                     ],
                   ),
-                ],
-              ),
-            ),
-          ),
-          const SizedBox(width: 5),
-
-          // 101 Çizelge Butonu
-          InkWell(
-            onTap: () {
-              SoundFx.playCardTap();
-              setState(() => _showScoreboardModal = !_showScoreboardModal);
-            },
-            borderRadius: BorderRadius.circular(10),
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-              decoration: BoxDecoration(
-                color: const Color(0xFFF59E0B).withValues(alpha: 0.18),
-                borderRadius: BorderRadius.circular(10),
-                border: Border.all(
-                  color: const Color(0xFFF59E0B).withValues(alpha: 0.5),
                 ),
               ),
-              child: const Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(Icons.leaderboard, color: Color(0xFFFBBF24), size: 14),
-                  SizedBox(width: 3),
-                  Text(
-                    '101',
-                    style: TextStyle(
-                      color: Color(0xFFFBBF24),
-                      fontWeight: FontWeight.w900,
-                      fontSize: 11,
+              const SizedBox(width: 5),
+
+              // 101 Puan Tablosu Butonu
+              InkWell(
+                onTap: () {
+                  SoundFx.playCardTap();
+                  setState(() => _showScoreboardModal = !_showScoreboardModal);
+                },
+                borderRadius: BorderRadius.circular(18),
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+                  decoration: BoxDecoration(
+                    color: Colors.black54,
+                    borderRadius: BorderRadius.circular(18),
+                    border: Border.all(color: const Color(0xFFD4AF37)),
+                  ),
+                  child: const Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        Icons.leaderboard,
+                        color: Color(0xFFFDE047),
+                        size: 13,
+                      ),
+                      SizedBox(width: 3),
+                      Text(
+                        '101',
+                        style: TextStyle(
+                          color: Color(0xFFFDE047),
+                          fontWeight: FontWeight.w900,
+                          fontSize: 11,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(width: 5),
+
+              // TELSİZ MİKROFON (Hem Basılı Tut hem Dokun-Konuş - Kesintisiz Listener!)
+              Listener(
+                onPointerDown: (_) => _onMicPointerDown(),
+                onPointerUp: (_) => _onMicPointerUp(),
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 150),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
+                  decoration: BoxDecoration(
+                    gradient: _isVoiceRecording
+                        ? const LinearGradient(
+                            colors: [Color(0xFFEF4444), Color(0xFFB91C1C)],
+                          )
+                        : const LinearGradient(
+                            colors: [Color(0xFF15803D), Color(0xFF064E3B)],
+                          ),
+                    borderRadius: BorderRadius.circular(18),
+                    border: Border.all(
+                      color: _isVoiceRecording
+                          ? Colors.white
+                          : const Color(0xFFD4AF37),
+                      width: 1.4,
                     ),
                   ),
-                ],
-              ),
-            ),
-          ),
-          const SizedBox(width: 5),
-
-          // Ses Aç/Kapat Hızlı Butonu
-          InkWell(
-            onTap: () async {
-              await SoundFx.setSoundEnabled(!SoundFx.soundEnabled);
-              if (SoundFx.soundEnabled) SoundFx.playCardTap();
-              setState(() {});
-            },
-            borderRadius: BorderRadius.circular(10),
-            child: Container(
-              padding: const EdgeInsets.all(6),
-              decoration: BoxDecoration(
-                color: Colors.white.withValues(alpha: 0.08),
-                borderRadius: BorderRadius.circular(10),
-              ),
-              child: Icon(
-                SoundFx.soundEnabled ? Icons.volume_up : Icons.volume_off,
-                color: SoundFx.soundEnabled
-                    ? const Color(0xFF34D399)
-                    : Colors.white38,
-                size: 16,
-              ),
-            ),
-          ),
-          const SizedBox(width: 5),
-
-          // Gerçek Mikrofon Bas-Konuş (Push-To-Talk) Butonu
-          GestureDetector(
-            onTapDown: (_) async {
-              final ok = await gs.startVoicePushToTalk();
-              if (mounted) setState(() => _isPttPressed = ok);
-            },
-            onTapUp: (_) async {
-              if (_isPttPressed) {
-                setState(() => _isPttPressed = false);
-                await gs.stopVoicePushToTalk();
-              }
-            },
-            onTapCancel: () async {
-              if (_isPttPressed) {
-                setState(() => _isPttPressed = false);
-                await gs.stopVoicePushToTalk();
-              }
-            },
-            child: AnimatedContainer(
-              duration: const Duration(milliseconds: 150),
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-              decoration: BoxDecoration(
-                color: _isPttPressed
-                    ? const Color(0xFF10B981)
-                    : Colors.white.withValues(alpha: 0.1),
-                borderRadius: BorderRadius.circular(10),
-                border: Border.all(
-                  color: _isPttPressed ? Colors.greenAccent : Colors.white24,
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        _isVoiceRecording ? Icons.mic : Icons.mic_none_rounded,
+                        color: Colors.white,
+                        size: 15,
+                      ),
+                      const SizedBox(width: 2),
+                      Text(
+                        _isVoiceRecording ? 'CANLI' : 'Ses',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.w900,
+                          fontSize: 10.5,
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
-                boxShadow: _isPttPressed
-                    ? [
-                        BoxShadow(
-                          color: const Color(0xFF10B981).withValues(alpha: 0.6),
-                          blurRadius: 10,
-                        )
-                      ]
-                    : null,
               ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(
-                    _isPttPressed ? Icons.mic : Icons.mic_none,
-                    color: Colors.white,
+              const SizedBox(width: 5),
+
+              // Ses Aç/Kapat & Sohbet İkonları
+              InkWell(
+                onTap: () async {
+                  await SoundFx.setSoundEnabled(!SoundFx.soundEnabled);
+                  if (SoundFx.soundEnabled) SoundFx.playCardTap();
+                  setState(() {});
+                },
+                borderRadius: BorderRadius.circular(18),
+                child: Container(
+                  width: 32,
+                  height: 32,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: Colors.black54,
+                    border: Border.all(color: const Color(0xFFD4AF37)),
+                  ),
+                  child: Icon(
+                    SoundFx.soundEnabled ? Icons.volume_up : Icons.volume_off,
+                    color: SoundFx.soundEnabled
+                        ? const Color(0xFFFDE047)
+                        : Colors.white38,
                     size: 15,
                   ),
-                  const SizedBox(width: 3),
-                  Text(
-                    _isPttPressed ? 'CANLI' : 'Ses',
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontWeight: FontWeight.bold,
+                ),
+              ),
+              const SizedBox(width: 4),
+              InkWell(
+                onTap: () => setState(() => _showChatDrawer = !_showChatDrawer),
+                borderRadius: BorderRadius.circular(18),
+                child: Container(
+                  width: 32,
+                  height: 32,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: Colors.black54,
+                    border: Border.all(color: const Color(0xFFD4AF37)),
+                  ),
+                  child: const Icon(
+                    Icons.chat_bubble_outline,
+                    color: Color(0xFFFDE047),
+                    size: 14,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+
+        // ZYNGA ALTIN TRAPEZOİD SÜRE BANDI ("MAÇ 09:05 • HAMLE 28s")
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 3.5),
+          decoration: BoxDecoration(
+            gradient: const LinearGradient(
+              colors: [Color(0xFF2B1911), Color(0xFF422719), Color(0xFF2B1911)],
+            ),
+            borderRadius: const BorderRadius.vertical(
+              bottom: Radius.circular(14),
+            ),
+            border: Border.all(
+              color: const Color(0xFFD4AF37).withValues(alpha: 0.8),
+              width: 1.2,
+            ),
+            boxShadow: const [
+              BoxShadow(color: Colors.black54, blurRadius: 6),
+            ],
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(
+                Icons.timer_outlined,
+                color: Color(0xFFFDE047),
+                size: 13,
+              ),
+              const SizedBox(width: 5),
+              Text(
+                isPlaying || table.roundNumber > 0
+                    ? 'MAÇ SÜRESİ $matchTimeStr  •  EL #${table.roundNumber}'
+                    : 'MASA BEKLİYOR (${table.entryFee} KREDİ)',
+                style: const TextStyle(
+                  color: Color(0xFFFDE047),
+                  fontWeight: FontWeight.w900,
+                  fontSize: 11,
+                  letterSpacing: 0.7,
+                ),
+              ),
+              if (isPlaying) ...[
+                const SizedBox(width: 8),
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 7, vertical: 1),
+                  decoration: BoxDecoration(
+                    color: table.turnRemainingSeconds <= 5
+                        ? const Color(0xFFDC2626)
+                        : const Color(0xFF10B981),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Text(
+                    '${table.turnRemainingSeconds} sn',
+                    style: TextStyle(
+                      color: table.turnRemainingSeconds <= 5
+                          ? Colors.white
+                          : Colors.black,
+                      fontWeight: FontWeight.w900,
                       fontSize: 10.5,
                     ),
                   ),
-                ],
-              ),
-            ),
+                ),
+              ],
+            ],
           ),
-          const SizedBox(width: 5),
-
-          // Sohbet Çekmecesi Butonu
-          InkWell(
-            onTap: () => setState(() => _showChatDrawer = !_showChatDrawer),
-            borderRadius: BorderRadius.circular(10),
-            child: Container(
-              padding: const EdgeInsets.all(6),
-              decoration: BoxDecoration(
-                color: Colors.white.withValues(alpha: 0.08),
-                borderRadius: BorderRadius.circular(10),
-              ),
-              child: const Icon(
-                Icons.chat_bubble_outline,
-                color: Colors.white,
-                size: 16,
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  // ===========================================================================
-  // 2. RAKİP KOLTUKLARI ALANI (DİKEY EKRAN İÇİN KOMPAKT & NET GÖRÜNÜM)
-  // ===========================================================================
-  Widget _buildOpponentsArea(
-    List<SeatPlayerModel?> seats,
-    int mySeatIdx,
-    TableStateModel table,
-    GameService gs,
-  ) {
-    final List<int> visibleSeatIndices = [];
-    for (int i = 0; i < seats.length; i++) {
-      visibleSeatIndices.add(i);
-    }
-
-    return Center(
-      child: SingleChildScrollView(
-        child: Wrap(
-          spacing: 8,
-          runSpacing: 6,
-          alignment: WrapAlignment.center,
-          children: visibleSeatIndices.map((seatIdx) {
-            final seat = seats[seatIdx];
-            return _buildCompactSeatCard(seat, seatIdx, mySeatIdx, table, gs);
-          }).toList(),
         ),
-      ),
+      ],
     );
   }
 
-  Widget _buildCompactSeatCard(
-    SeatPlayerModel? seat,
-    int seatIndex,
-    int mySeatIdx,
-    TableStateModel table,
-    GameService gs,
-  ) {
+  // ===========================================================================
+  // 2. ZYNGA CASINO MASASI (MASA KENARI AVATARLARI + ORTA JOKER/DESTE/ATILAN)
+  // ===========================================================================
+  Widget _buildZyngaCasinoTableArea({
+    required TableStateModel table,
+    required List<SeatPlayerModel?> seats,
+    required int mySeatIdx,
+    required SeatPlayerModel? mySeat,
+    required bool isPlaying,
+    required bool isMyTurn,
+    required bool hasDrawn,
+    required GameService gs,
+  }) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final w = constraints.maxWidth;
+        final h = constraints.maxHeight;
+
+        // Koltukları masa etrafındaki 6 noktaya (Sol-Üst, Sağ-Üst, Sol-Orta, Sağ-Orta, Sol-Alt, Sağ-Alt) yerleştir
+        final seatPositions = _calculateTableRimPositions(seats.length, w, h);
+
+        return Stack(
+          clipBehavior: Clip.none,
+          children: [
+            // ÜST ORTA: ALTIN FİŞ YIĞINI (POT GÖSTERGESİ)
+            Positioned(
+              top: 6,
+              left: 0,
+              right: 0,
+              child: Center(
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: Colors.black.withValues(alpha: 0.55),
+                    borderRadius: BorderRadius.circular(20),
+                    border: Border.all(
+                      color: const Color(0xFFD4AF37).withValues(alpha: 0.7),
+                    ),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Text('🪙🪙', style: TextStyle(fontSize: 13)),
+                      const SizedBox(width: 5),
+                      Text(
+                        'ÖDÜL HAVUZU: ${table.pot} KREDİ',
+                        style: const TextStyle(
+                          color: Color(0xFFFDE047),
+                          fontWeight: FontWeight.w900,
+                          fontSize: 10.5,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+
+            // MASA ORTASI: GÖSTERGE JOKERİ + KAPALI DESTE + ATILAN KAĞIT (veya Hazır Ol ekranı)
+            Align(
+              alignment: const Alignment(0, 0.08),
+              child: _buildCenterTableFeltCards(
+                table: table,
+                isPlaying: isPlaying,
+                isMyTurn: isMyTurn,
+                hasDrawn: hasDrawn,
+                mySeatIdx: mySeatIdx,
+                mySeat: mySeat,
+                gs: gs,
+              ),
+            ),
+
+            // MASA KENARINDAKİ DÜairesel ZYNGA OYUNCU AVATARLARI VE CANLI SAYAÇ HALKALARI
+            for (int i = 0; i < seats.length; i++)
+              Positioned(
+                left: seatPositions[i].dx,
+                top: seatPositions[i].dy,
+                child: _buildZyngaCircularSeatAvatar(
+                  seat: seats[i],
+                  seatIndex: i,
+                  mySeatIdx: mySeatIdx,
+                  table: table,
+                  gs: gs,
+                ),
+              ),
+          ],
+        );
+      },
+    );
+  }
+
+  List<Offset> _calculateTableRimPositions(int count, double w, double h) {
+    const double avatarWidth = 92.0;
+    final double leftX = 6.0;
+    final double rightX = w - avatarWidth - 6.0;
+
+    if (count == 2) {
+      return [
+        Offset(leftX + 14, h * 0.08),
+        Offset(rightX - 14, h * 0.08),
+      ];
+    } else if (count == 3) {
+      return [
+        Offset(leftX + 10, h * 0.06),
+        Offset(rightX - 10, h * 0.06),
+        Offset(leftX, h * 0.48),
+      ];
+    } else if (count == 4) {
+      return [
+        Offset(leftX + 10, h * 0.05),
+        Offset(rightX - 10, h * 0.05),
+        Offset(leftX, h * 0.48),
+        Offset(rightX, h * 0.48),
+      ];
+    } else if (count == 5) {
+      return [
+        Offset(leftX + 12, h * 0.03),
+        Offset(rightX - 12, h * 0.03),
+        Offset(leftX, h * 0.36),
+        Offset(rightX, h * 0.36),
+        Offset(leftX + 6, h * 0.68),
+      ];
+    } else {
+      return [
+        Offset(leftX + 12, h * 0.03),
+        Offset(rightX - 12, h * 0.03),
+        Offset(leftX, h * 0.36),
+        Offset(rightX, h * 0.36),
+        Offset(leftX + 8, h * 0.68),
+        Offset(rightX - 8, h * 0.68),
+      ];
+    }
+  }
+
+  /// Zynga UI Mockup'ındaki gibi Dairesel Avatar + Parlayan Geri Sayım Halkası + Alt Puan Etiketi
+  Widget _buildZyngaCircularSeatAvatar({
+    required SeatPlayerModel? seat,
+    required int seatIndex,
+    required int mySeatIdx,
+    required TableStateModel table,
+    required GameService gs,
+  }) {
     final isEmpty = seat == null;
     final isMe = seatIndex == mySeatIdx && mySeatIdx != -1;
     final isCurrentTurn =
         table.status == 'playing' && table.currentTurnSeat == seatIndex;
 
-    // Boş koltuk görünümü
     if (isEmpty) {
       final canSit = mySeatIdx == -1 &&
           (table.status == 'waiting' || table.status == 'finished');
@@ -631,35 +950,46 @@ class _TableScreenState extends State<TableScreen> {
                 gs.sitAtSeat(seatIndex);
               }
             : null,
-        child: Container(
-          width: 104,
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 7),
-          decoration: BoxDecoration(
-            color: canSit
-                ? const Color(0xFFF59E0B).withValues(alpha: 0.16)
-                : Colors.black.withValues(alpha: 0.25),
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(
-              color: canSit
-                  ? const Color(0xFFF59E0B).withValues(alpha: 0.75)
-                  : Colors.white12,
-            ),
-          ),
+        child: SizedBox(
+          width: 92,
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(
-                canSit ? Icons.event_seat : Icons.chair_outlined,
-                color: canSit ? const Color(0xFFFBBF24) : Colors.white30,
-                size: 16,
+              Container(
+                width: 52,
+                height: 52,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: Colors.black.withValues(alpha: 0.55),
+                  border: Border.all(
+                    color: canSit
+                        ? const Color(0xFFFACC15)
+                        : Colors.white.withValues(alpha: 0.25),
+                    width: canSit ? 2.0 : 1.2,
+                  ),
+                ),
+                child: Icon(
+                  canSit ? Icons.add_rounded : Icons.event_seat_outlined,
+                  color: canSit ? const Color(0xFFFDE047) : Colors.white38,
+                  size: 24,
+                ),
               ),
-              const SizedBox(height: 2),
-              Text(
-                canSit ? 'OTUR #${seatIndex + 1}' : 'Boş #${seatIndex + 1}',
-                style: TextStyle(
-                  color: canSit ? const Color(0xFFFBBF24) : Colors.white38,
-                  fontWeight: FontWeight.w800,
-                  fontSize: 10.5,
+              const SizedBox(height: 3),
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                decoration: BoxDecoration(
+                  color: Colors.black.withValues(alpha: 0.7),
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: Colors.white24, width: 0.8),
+                ),
+                child: Text(
+                  canSit ? 'OTUR #${seatIndex + 1}' : 'Boş #${seatIndex + 1}',
+                  style: TextStyle(
+                    color: canSit ? const Color(0xFFFDE047) : Colors.white54,
+                    fontWeight: FontWeight.w800,
+                    fontSize: 9.5,
+                  ),
                 ),
               ),
             ],
@@ -669,8 +999,15 @@ class _TableScreenState extends State<TableScreen> {
     }
 
     final avatar = VipAvatar.fromKey(seat.avatar);
-    final isEliminated = seat.isEliminated;
     final isSpeaking = gs.activeVoiceSpeakerUsername == seat.username;
+    final progress = isCurrentTurn
+        ? (table.turnRemainingSeconds / 30.0).clamp(0.0, 1.0)
+        : 0.0;
+    final ringColor = table.turnRemainingSeconds <= 5
+        ? const Color(0xFFEF4444)
+        : table.turnRemainingSeconds <= 12
+            ? const Color(0xFFFACC15)
+            : const Color(0xFF22C55E);
 
     return GestureDetector(
       onTap: () {
@@ -678,256 +1015,259 @@ class _TableScreenState extends State<TableScreen> {
           _showEffectPickerDialog(seat.userId, seat.username);
         }
       },
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 220),
-        width: 112,
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-        decoration: BoxDecoration(
-          color: isMe
-              ? const Color(0xFF103826).withValues(alpha: 0.95)
-              : const Color(0xFF0A2418).withValues(alpha: 0.94),
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(
-            color: isCurrentTurn
-                ? const Color(0xFFF59E0B)
-                : isSpeaking
-                    ? const Color(0xFF10B981)
-                    : isMe
-                        ? const Color(0xFF34D399).withValues(alpha: 0.7)
-                        : isEliminated
-                            ? Colors.redAccent.withValues(alpha: 0.6)
-                            : Colors.white24,
-            width: isCurrentTurn || isSpeaking ? 2.0 : 1.1,
-          ),
-          boxShadow: isCurrentTurn
-              ? [
-                  BoxShadow(
-                    color: const Color(0xFFF59E0B).withValues(alpha: 0.4),
-                    blurRadius: 10,
-                  )
-                ]
-              : null,
-        ),
+      child: SizedBox(
+        width: 92,
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Row(
+            // Dairesel Avatar + 360 Derece Canlı Geri Sayım Halkası
+            Stack(
+              alignment: Alignment.center,
               children: [
-                Text(avatar.emoji, style: const TextStyle(fontSize: 14)),
-                const SizedBox(width: 4),
-                Expanded(
-                  child: Text(
+                if (isCurrentTurn)
+                  Container(
+                    width: 60,
+                    height: 60,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      boxShadow: [
+                        BoxShadow(
+                          color: ringColor.withValues(alpha: 0.65),
+                          blurRadius: 14,
+                          spreadRadius: 2,
+                        ),
+                      ],
+                    ),
+                    child: CircularProgressIndicator(
+                      value: progress,
+                      strokeWidth: 4.2,
+                      backgroundColor: Colors.black45,
+                      valueColor: AlwaysStoppedAnimation<Color>(ringColor),
+                    ),
+                  ),
+                Container(
+                  width: 50,
+                  height: 50,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    gradient: RadialGradient(
+                      colors: [
+                        avatar.color.withValues(alpha: 0.55),
+                        const Color(0xFF0F172A),
+                      ],
+                    ),
+                    border: Border.all(
+                      color: isSpeaking
+                          ? const Color(0xFF22C55E)
+                          : isMe
+                              ? const Color(0xFFFACC15)
+                              : const Color(0xFFD4AF37),
+                      width: 2.0,
+                    ),
+                  ),
+                  child: Center(
+                    child: Text(
+                      avatar.emoji,
+                      style: const TextStyle(fontSize: 24),
+                    ),
+                  ),
+                ),
+
+                // Elindeki Kağıt Sayısı Rozeti (Sağ Üst)
+                if (table.status == 'playing' && !seat.isEliminated)
+                  Positioned(
+                    right: 0,
+                    top: 0,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 5,
+                        vertical: 1.5,
+                      ),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF1E293B),
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(
+                          color: const Color(0xFFD4AF37),
+                          width: 1,
+                        ),
+                      ),
+                      child: Text(
+                        '${seat.cardCount}',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.w900,
+                          fontSize: 9.5,
+                        ),
+                      ),
+                    ),
+                  ),
+
+                // Konuşuyor İkonu
+                if (isSpeaking)
+                  Positioned(
+                    left: 0,
+                    top: 0,
+                    child: Container(
+                      padding: const EdgeInsets.all(3),
+                      decoration: const BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: Color(0xFF10B981),
+                      ),
+                      child: const Icon(
+                        Icons.volume_up,
+                        color: Colors.white,
+                        size: 11,
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 3),
+
+            // İsim ve Puan Etiketi (Zynga Stil Altın Çerçeveli Siyah Kapsül)
+            Container(
+              width: 90,
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+              decoration: BoxDecoration(
+                color: Colors.black.withValues(alpha: 0.82),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(
+                  color: isCurrentTurn
+                      ? ringColor
+                      : const Color(0xFFD4AF37).withValues(alpha: 0.65),
+                  width: 1.1,
+                ),
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
                     isMe ? '${seat.username} (Sen)' : seat.username,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
                       color: isMe ? const Color(0xFFFDE047) : Colors.white,
                       fontWeight: FontWeight.w800,
-                      fontSize: 10.5,
+                      fontSize: 10,
                     ),
                   ),
-                ),
-                if (isSpeaking)
-                  const Icon(
-                    Icons.volume_up,
-                    color: Color(0xFF10B981),
-                    size: 13,
-                  ),
-              ],
-            ),
-            const SizedBox(height: 4),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                // 101 Ceza Puanı
-                Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 5, vertical: 1.5),
-                  decoration: BoxDecoration(
-                    color: seat.totalScore >= 85
-                        ? Colors.redAccent.withValues(alpha: 0.28)
-                        : Colors.white.withValues(alpha: 0.08),
-                    borderRadius: BorderRadius.circular(5),
-                  ),
-                  child: Text(
-                    '${seat.totalScore}/101',
-                    style: TextStyle(
-                      color: seat.totalScore >= 85
-                          ? Colors.redAccent
-                          : const Color(0xFFFBBF24),
-                      fontWeight: FontWeight.w900,
-                      fontSize: 9.5,
-                    ),
-                  ),
-                ),
-                if (table.status == 'playing')
+                  const SizedBox(height: 1),
                   Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
                     children: [
-                      const Icon(Icons.style, color: Colors.white60, size: 11),
-                      const SizedBox(width: 2),
+                      const Text('🪙', style: TextStyle(fontSize: 9)),
+                      const SizedBox(width: 3),
                       Text(
-                        '${seat.cardCount}',
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontWeight: FontWeight.bold,
-                          fontSize: 10,
+                        seat.isEliminated
+                            ? 'YANDI (${seat.totalScore})'
+                            : '${seat.totalScore}/101',
+                        style: TextStyle(
+                          color: seat.isEliminated || seat.totalScore >= 85
+                              ? Colors.redAccent
+                              : const Color(0xFFFDE047),
+                          fontWeight: FontWeight.w900,
+                          fontSize: 9.5,
                         ),
                       ),
                     ],
-                  )
-                else
-                  Text(
-                    seat.isReady ? 'HAZIR' : 'Bekliyor',
-                    style: TextStyle(
-                      color: seat.isReady
-                          ? const Color(0xFF34D399)
-                          : Colors.white38,
-                      fontWeight: FontWeight.bold,
-                      fontSize: 9.5,
-                    ),
                   ),
-              ],
+                ],
+              ),
             ),
-            if (isCurrentTurn) ...[
-              const SizedBox(height: 3),
-              Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
-                decoration: BoxDecoration(
-                  color: const Color(0xFFF59E0B),
-                  borderRadius: BorderRadius.circular(4),
-                ),
-                child: Text(
-                  '⏳ ${table.turnRemainingSeconds} sn',
-                  style: const TextStyle(
-                    color: Colors.black,
-                    fontWeight: FontWeight.w900,
-                    fontSize: 9,
-                  ),
-                ),
-              ),
-            ] else if (seat.rebuyCount > 0) ...[
-              const SizedBox(height: 2),
-              Text(
-                '🔄 ${seat.rebuyCount}x Giriş',
-                style: const TextStyle(
-                  color: Colors.orangeAccent,
-                  fontSize: 8.5,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-            ],
           ],
         ),
       ),
     );
   }
 
-  // ===========================================================================
-  // 3. ORTA ÇUHA MERKEZİ (GÖSTERGE JOKERİ DESTENİN YANINDA %100 GÖRÜNÜR!)
-  // ===========================================================================
-  Widget _buildCenterFeltArea(
-    TableStateModel table,
-    bool isMyTurn,
-    bool hasDrawn,
-    int mySeatIdx,
-    SeatPlayerModel? mySeat,
-    bool isPlaying,
-  ) {
-    final gs = GameService.instance;
-    final indicator = table.indicatorCard;
-    final drawCount = table.drawPileCount;
-    final discardTop = table.topDiscardCard;
-    final canDrawNow = isMyTurn && !hasDrawn;
-
+  /// Masa Ortası: Gösterge Jokeri (Sol) + Kapalı Deste (Sağ) + Atılan Kağıt (Alt Orta)
+  Widget _buildCenterTableFeltCards({
+    required TableStateModel table,
+    required bool isPlaying,
+    required bool isMyTurn,
+    required bool hasDrawn,
+    required int mySeatIdx,
+    required SeatPlayerModel? mySeat,
+    required GameService gs,
+  }) {
     if (!isPlaying) {
       return Container(
-        margin: const EdgeInsets.symmetric(vertical: 2),
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        width: 230,
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
         decoration: BoxDecoration(
-          color: Colors.black.withValues(alpha: 0.38),
+          color: Colors.black.withValues(alpha: 0.62),
           borderRadius: BorderRadius.circular(18),
           border: Border.all(
-            color: const Color(0xFFF59E0B).withValues(alpha: 0.35),
+            color: const Color(0xFFD4AF37).withValues(alpha: 0.75),
+            width: 1.5,
           ),
         ),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
             const Text(
-              '🃏 YUNAN YANIK VIP MASASI',
+              '👑 YUNAN YANIK VIP',
               style: TextStyle(
-                color: Color(0xFFFBBF24),
+                color: Color(0xFFFDE047),
                 fontWeight: FontWeight.w900,
-                fontSize: 12.5,
-                letterSpacing: 0.8,
+                fontSize: 13,
               ),
             ),
-            const SizedBox(height: 3),
+            const SizedBox(height: 4),
             Text(
               mySeatIdx == -1
-                  ? 'Oyuna katılmak için yukarıdaki boş koltuklardan birine dokunun.'
-                  : 'En az 2 oyuncu HAZIR olduğunda 10\'ar kağıt otomatik dağıtılır.',
+                  ? 'Masadaki boş koltuklardan birine dokunarak oturun.'
+                  : 'En az 2 oyuncu HAZIR olduğunda 10\'ar kağıt dağıtılır.',
               textAlign: TextAlign.center,
-              style: const TextStyle(color: Colors.white70, fontSize: 11),
+              style: const TextStyle(color: Colors.white70, fontSize: 10.5),
             ),
             if (mySeat != null) ...[
-              const SizedBox(height: 8),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  ElevatedButton.icon(
-                    onPressed: () {
-                      SoundFx.playCardTap();
-                      gs.toggleReady();
-                    },
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: mySeat.isReady
-                          ? const Color(0xFF059669)
-                          : const Color(0xFFF59E0B),
-                      foregroundColor:
-                          mySeat.isReady ? Colors.white : Colors.black,
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 18,
-                        vertical: 9,
-                      ),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                    ),
-                    icon: Icon(
-                      mySeat.isReady
-                          ? Icons.check_circle
-                          : Icons.play_arrow_rounded,
-                      size: 17,
-                    ),
-                    label: Text(
-                      mySeat.isReady
-                          ? 'HAZIRSINIZ (Bekleniyor...)'
-                          : 'MAÇ İÇİN HAZIR OL',
-                      style: const TextStyle(
-                        fontWeight: FontWeight.w900,
-                        fontSize: 12,
-                      ),
+              const SizedBox(height: 10),
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton.icon(
+                  onPressed: () {
+                    SoundFx.playCardTap();
+                    gs.toggleReady();
+                  },
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: mySeat.isReady
+                        ? const Color(0xFF059669)
+                        : const Color(0xFFD4AF37),
+                    foregroundColor:
+                        mySeat.isReady ? Colors.white : Colors.black,
+                    padding: const EdgeInsets.symmetric(vertical: 9),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
                     ),
                   ),
-                  const SizedBox(width: 8),
-                  OutlinedButton(
-                    onPressed: () {
-                      SoundFx.playCardTap();
-                      gs.standUp();
-                    },
-                    style: OutlinedButton.styleFrom(
-                      foregroundColor: Colors.white70,
-                      side: const BorderSide(color: Colors.white24),
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 12,
-                        vertical: 9,
-                      ),
-                    ),
-                    child: const Text('Kalk', style: TextStyle(fontSize: 11.5)),
+                  icon: Icon(
+                    mySeat.isReady ? Icons.check_circle : Icons.play_arrow,
+                    size: 16,
                   ),
-                ],
+                  label: Text(
+                    mySeat.isReady ? 'HAZIRSINIZ' : 'HAZIR OL',
+                    style: const TextStyle(
+                      fontWeight: FontWeight.w900,
+                      fontSize: 12,
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 4),
+              InkWell(
+                onTap: () => gs.standUp(),
+                child: const Padding(
+                  padding: EdgeInsets.all(4.0),
+                  child: Text(
+                    'Koltuktan Kalk',
+                    style: TextStyle(
+                      color: Colors.white54,
+                      fontSize: 10.5,
+                      decoration: TextDecoration.underline,
+                    ),
+                  ),
+                ),
               ),
             ],
           ],
@@ -935,605 +1275,470 @@ class _TableScreenState extends State<TableScreen> {
       );
     }
 
-    // OYUN SIRASINDA ORTA MASA:
-    // Sol: GÖSTERGE JOKERİ (Tam açık ve çok net — destenin hemen yanında!)
-    // Orta: KAPALI DESTE (Dokununca kart çeker)
-    // Sağ: ATILAN KAĞIT (Son atılan kart)
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
-      decoration: BoxDecoration(
-        color: Colors.black.withValues(alpha: 0.28),
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(
-          color: canDrawNow
-              ? const Color(0xFF10B981).withValues(alpha: 0.75)
-              : Colors.white.withValues(alpha: 0.12),
-          width: canDrawNow ? 1.8 : 1.0,
-        ),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          // 1. GÖSTERGE JOKERİ (Destenin hemen yanında tam görünür!)
-          Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                decoration: BoxDecoration(
-                  color: const Color(0xFFF59E0B).withValues(alpha: 0.22),
-                  borderRadius: BorderRadius.circular(6),
-                  border: Border.all(
-                    color: const Color(0xFFF59E0B).withValues(alpha: 0.65),
-                  ),
-                ),
-                child: Text(
-                  indicator != null
-                      ? '👑 JOKER: ${indicator.rankLabel}'
-                      : '👑 JOKER',
-                  style: const TextStyle(
-                    color: Color(0xFFFBBF24),
-                    fontSize: 9.5,
-                    fontWeight: FontWeight.w900,
-                  ),
-                ),
-              ),
-              const SizedBox(height: 4),
-              if (indicator != null)
-                PlayingCardWidget(
-                  card: indicator,
-                  wildRank: table.wildRank,
-                  width: 58,
-                  height: 84,
-                )
-              else
-                const SizedBox(width: 58, height: 84),
-            ],
-          ),
+    final indicator = table.indicatorCard;
+    final drawCount = table.drawPileCount;
+    final discardTop = table.topDiscardCard;
+    final canDrawNow = isMyTurn && !hasDrawn;
 
-          const SizedBox(width: 16),
-
-          // 2. KAPALI DESTE (Sıra oyuncudaysa parlak çerçeveli)
-          GestureDetector(
-            onTap: canDrawNow ? () => gs.drawCard() : null,
-            child: Column(
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        // ÜST SIRA: SOLDA GÖSTERGE JOKERİ, SAĞDA 3D KAPALI DESTE (Tasarım Görseliyle Birebir!)
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.end,
+          children: [
+            // 1. GÖSTERGE JOKERİ (Üstünde Altın Taç + Altında JOKER 7♥ Yazısı)
+            Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
-                  decoration: BoxDecoration(
-                    color: canDrawNow
-                        ? const Color(0xFF10B981)
-                        : Colors.white.withValues(alpha: 0.1),
-                    borderRadius: BorderRadius.circular(6),
-                  ),
-                  child: Text(
-                    canDrawNow
-                        ? '👇 KAĞIT ÇEK ($drawCount)'
-                        : 'DESTE ($drawCount)',
-                    style: TextStyle(
-                      color: canDrawNow ? Colors.black : Colors.white70,
-                      fontSize: 9.5,
-                      fontWeight: FontWeight.w900,
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 4),
-                AnimatedContainer(
-                  duration: const Duration(milliseconds: 220),
-                  decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(10),
-                    boxShadow: canDrawNow
-                        ? [
-                            BoxShadow(
-                              color: const Color(0xFF10B981)
-                                  .withValues(alpha: 0.65),
-                              blurRadius: 14,
-                              spreadRadius: 2,
-                            ),
-                          ]
-                        : null,
-                  ),
-                  child: const CardBackWidget(
+                const Text('👑', style: TextStyle(fontSize: 18, height: 1.0)),
+                const SizedBox(height: 2),
+                if (indicator != null)
+                  PlayingCardWidget(
+                    card: indicator,
+                    wildRank: table.wildRank,
                     width: 60,
                     height: 86,
-                    badgeText: 'ÇEK',
-                  ),
-                ),
-              ],
-            ),
-          ),
-
-          const SizedBox(width: 16),
-
-          // 3. ATILAN KAĞIT YIĞINI
-          Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                decoration: BoxDecoration(
-                  color: Colors.white.withValues(alpha: 0.08),
-                  borderRadius: BorderRadius.circular(6),
-                ),
-                child: const Text(
-                  'ATILAN KAĞIT',
-                  style: TextStyle(
-                    color: Colors.white70,
-                    fontSize: 9.5,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-              ),
-              const SizedBox(height: 4),
-              discardTop != null
-                  ? PlayingCardWidget(
-                      card: discardTop,
-                      wildRank: table.wildRank,
-                      width: 58,
-                      height: 84,
-                    )
-                  : Container(
-                      width: 58,
-                      height: 84,
-                      decoration: BoxDecoration(
-                        color: Colors.white.withValues(alpha: 0.04),
-                        borderRadius: BorderRadius.circular(10),
-                        border: Border.all(color: Colors.white24),
-                      ),
-                      child: const Center(
-                        child: Text(
-                          'BOŞ',
-                          style: TextStyle(
-                            color: Colors.white30,
-                            fontSize: 10,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                      ),
-                    ),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-
-  // ===========================================================================
-  // 4. ALT OYUNCU ELİ (BATAK HD STİLİ BÜYÜK YELPAZE + SÜRÜKLE BIRAK)
-  // ===========================================================================
-  Widget _buildBottomPlayerHandArea(
-    GameService gs,
-    TableStateModel table,
-    SeatPlayerModel? mySeat,
-    int mySeatIdx,
-    bool isMyTurn,
-    bool hasDrawn,
-    bool isPlaying,
-  ) {
-    final hand = table.myHand;
-    final meldedIds = table.meldedCardIds;
-    final canFinish = table.canFinishNow;
-    final deadwoodPoints = table.currentHandPenalty;
-    final remainingSec = table.turnRemainingSeconds;
-
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.only(top: 6, bottom: 8),
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
-          colors: [
-            Colors.black.withValues(alpha: 0.15),
-            Colors.black.withValues(alpha: 0.65),
-          ],
-        ),
-        border: Border(
-          top: BorderSide(
-            color: isMyTurn
-                ? const Color(0xFFF59E0B).withValues(alpha: 0.65)
-                : Colors.white.withValues(alpha: 0.1),
-            width: isMyTurn ? 1.5 : 1.0,
-          ),
-        ),
-      ),
-      child: Column(
-        children: [
-          // ÜST BİLGİ & BASİT PUAN ROZETİ + DİZ BUTONU
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 10),
-            child: Row(
-              children: [
-                // Basit ve Şık Elde Kalan Sayı Rozeti
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 10,
-                    vertical: 5,
-                  ),
-                  decoration: BoxDecoration(
-                    color: canFinish
-                        ? const Color(0xFF10B981).withValues(alpha: 0.25)
-                        : const Color(0xFF0F291E),
-                    borderRadius: BorderRadius.circular(20),
-                    border: Border.all(
-                      color: canFinish
-                          ? const Color(0xFF10B981)
-                          : const Color(0xFFF59E0B).withValues(alpha: 0.45),
-                    ),
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(
-                        canFinish
-                            ? Icons.verified_rounded
-                            : Icons.calculate_outlined,
-                        color: canFinish
-                            ? const Color(0xFF34D399)
-                            : const Color(0xFFFBBF24),
-                        size: 14,
-                      ),
-                      const SizedBox(width: 4),
-                      Text(
-                        canFinish
-                            ? 'EL AÇMAYA HAZIR (0p)'
-                            : 'Elde: $deadwoodPoints Puan',
-                        style: TextStyle(
-                          color: canFinish
-                              ? const Color(0xFF34D399)
-                              : Colors.white,
-                          fontWeight: FontWeight.w800,
-                          fontSize: 11,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-
-                const SizedBox(width: 6),
-
-                // Sıra ve Geri Sayım Göstergesi
-                if (isPlaying && isMyTurn)
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 9,
-                      vertical: 5,
-                    ),
-                    decoration: BoxDecoration(
-                      color: remainingSec <= 5
-                          ? Colors.redAccent
-                          : const Color(0xFFF59E0B),
-                      borderRadius: BorderRadius.circular(20),
-                    ),
-                    child: Text(
-                      !hasDrawn
-                          ? '⏳ $remainingSec sn • Kağıt Çek'
-                          : '⏳ $remainingSec sn • Kağıt At',
-                      style: TextStyle(
-                        color:
-                            remainingSec <= 5 ? Colors.white : Colors.black,
-                        fontWeight: FontWeight.w900,
-                        fontSize: 10.5,
-                      ),
-                    ),
-                  ),
-
-                const Spacer(),
-
-                // Otomatik Per / Seri Dizme Butonu
-                if (hand.isNotEmpty)
-                  InkWell(
-                    onTap: () {
-                      SoundFx.playCardTap();
-                      gs.reorderHand();
-                    },
-                    borderRadius: BorderRadius.circular(16),
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 10,
-                        vertical: 5,
-                      ),
-                      decoration: BoxDecoration(
-                        color: Colors.white.withValues(alpha: 0.1),
-                        borderRadius: BorderRadius.circular(16),
-                        border: Border.all(color: Colors.white24),
-                      ),
-                      child: const Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(
-                            Icons.auto_fix_high,
-                            color: Color(0xFFFBBF24),
-                            size: 13,
-                          ),
-                          SizedBox(width: 4),
-                          Text(
-                            'Otomatik Diz',
-                            style: TextStyle(
-                              color: Colors.white,
-                              fontWeight: FontWeight.bold,
-                              fontSize: 11,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-              ],
-            ),
-          ),
-
-          const SizedBox(height: 4),
-
-          // KARTLAR ALANI (Batak HD Gibi Elde Büyük Yelpaze + Kolay Sürükleme)
-          Expanded(
-            child: hand.isEmpty
-                ? Center(
-                    child: Text(
-                      mySeatIdx == -1
-                          ? 'Oynamak için yukarıdan bir koltuğa oturun'
-                          : 'Yeni elin başlaması bekleniyor...',
-                      style: const TextStyle(
-                        color: Colors.white54,
-                        fontSize: 13,
-                      ),
-                    ),
                   )
-                : _buildInteractiveFanHand(
-                    hand: hand,
-                    meldedIds: meldedIds,
-                    wildRank: table.wildRank,
-                    winningDiscardCardId: table.winningDiscardCardId,
-                    lastDrawnCardId: gs.lastDrawnCardId,
+                else
+                  const SizedBox(width: 60, height: 86),
+                const SizedBox(height: 4),
+                Text(
+                  indicator != null
+                      ? 'JOKER ${indicator.rankLabel}${indicator.suitSymbol}'
+                      : 'JOKER',
+                  style: const TextStyle(
+                    color: Color(0xFFFDE047),
+                    fontWeight: FontWeight.w900,
+                    fontSize: 10.5,
+                    shadows: [Shadow(color: Colors.black, blurRadius: 4)],
                   ),
-          ),
+                ),
+              ],
+            ),
 
-          // ALT HAMLE BUTONLARI (Desteden Çek / Seçili Kağıdı At / El Aç Bitir)
-          if (isPlaying && mySeatIdx != -1)
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.center,
+            const SizedBox(width: 22),
+
+            // 2. 3D KAPALI DESTE (DESTE 54)
+            GestureDetector(
+              onTap: canDrawNow ? () => gs.drawCard() : null,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
                 children: [
-                  if (isMyTurn && !hasDrawn)
-                    Expanded(
-                      child: ElevatedButton.icon(
-                        onPressed: () => gs.drawCard(),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: const Color(0xFF10B981),
-                          foregroundColor: Colors.black,
-                          padding: const EdgeInsets.symmetric(vertical: 11),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(14),
-                          ),
-                        ),
-                        icon: const Icon(Icons.download_rounded, size: 18),
-                        label: const Text(
-                          'DESTEDEN KAĞIT ÇEK',
-                          style: TextStyle(
-                            fontWeight: FontWeight.w900,
-                            fontSize: 13,
-                          ),
-                        ),
-                      ),
+                  AnimatedContainer(
+                    duration: const Duration(milliseconds: 220),
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(10),
+                      boxShadow: canDrawNow
+                          ? [
+                              BoxShadow(
+                                color: const Color(0xFF22C55E)
+                                    .withValues(alpha: 0.8),
+                                blurRadius: 16,
+                                spreadRadius: 2,
+                              ),
+                            ]
+                          : null,
                     ),
-                  if (isMyTurn && hasDrawn) ...[
-                    Expanded(
-                      child: ElevatedButton.icon(
-                        onPressed: _selectedCardId != null
-                            ? () {
-                                gs.discardCard(_selectedCardId!);
-                                setState(() => _selectedCardId = null);
-                              }
-                            : null,
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: const Color(0xFFF59E0B),
-                          disabledBackgroundColor: Colors.white12,
-                          foregroundColor: Colors.black,
-                          padding: const EdgeInsets.symmetric(vertical: 11),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(14),
-                          ),
-                        ),
-                        icon: const Icon(Icons.upload_rounded, size: 18),
-                        label: Text(
-                          _selectedCardId != null
-                              ? 'SEÇİLİ KAĞIDI AT'
-                              : 'ATILACAK KAĞIDA DOKUNUN',
-                          style: const TextStyle(
-                            fontWeight: FontWeight.w900,
-                            fontSize: 12,
-                          ),
-                        ),
-                      ),
+                    child: CardBackWidget(
+                      width: 60,
+                      height: 86,
+                      deckCount: drawCount,
                     ),
-                  ],
-                  if (isMyTurn && canFinish) ...[
-                    const SizedBox(width: 8),
-                    ElevatedButton.icon(
-                      onPressed: () {
-                        gs.declareFinish(
-                          discardCardId:
-                              _selectedCardId ?? table.winningDiscardCardId,
-                        );
-                        setState(() => _selectedCardId = null);
-                      },
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: const Color(0xFFEF4444),
-                        foregroundColor: Colors.white,
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 14,
-                          vertical: 11,
-                        ),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(14),
-                        ),
-                      ),
-                      icon: const Icon(
-                        Icons.local_fire_department,
-                        size: 18,
-                      ),
-                      label: const Text(
-                        'EL AÇ / BİTİR',
-                        style: TextStyle(
-                          fontWeight: FontWeight.w900,
-                          fontSize: 12,
-                        ),
-                      ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    canDrawNow ? '👇 DESTE $drawCount' : 'DESTE $drawCount',
+                    style: TextStyle(
+                      color: canDrawNow
+                          ? const Color(0xFF4ADE80)
+                          : const Color(0xFFFDE047),
+                      fontWeight: FontWeight.w900,
+                      fontSize: 10.5,
+                      shadows: const [
+                        Shadow(color: Colors.black, blurRadius: 4),
+                      ],
                     ),
-                  ],
+                  ),
                 ],
               ),
             ),
-        ],
-      ),
+          ],
+        ),
+
+        const SizedBox(height: 8),
+
+        // ALT ORTA: ATILAN KAĞIT (ATILAN K♠)
+        Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              discardTop != null
+                  ? 'ATILAN ${discardTop.rankLabel}${discardTop.suitSymbol}'
+                  : 'ATILAN KAĞIT',
+              style: const TextStyle(
+                color: Color(0xFFFDE047),
+                fontWeight: FontWeight.w900,
+                fontSize: 10,
+                shadows: [Shadow(color: Colors.black, blurRadius: 4)],
+              ),
+            ),
+            const SizedBox(height: 3),
+            discardTop != null
+                ? PlayingCardWidget(
+                    card: discardTop,
+                    wildRank: table.wildRank,
+                    width: 58,
+                    height: 82,
+                  )
+                : Container(
+                    width: 58,
+                    height: 82,
+                    decoration: BoxDecoration(
+                      color: Colors.black.withValues(alpha: 0.25),
+                      borderRadius: BorderRadius.circular(9),
+                      border: Border.all(
+                        color: const Color(0xFFD4AF37).withValues(alpha: 0.35),
+                      ),
+                    ),
+                    child: const Center(
+                      child: Text(
+                        'BOŞ',
+                        style: TextStyle(
+                          color: Colors.white38,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 9.5,
+                        ),
+                      ),
+                    ),
+                  ),
+          ],
+        ),
+      ],
     );
   }
 
-  /// Batak HD tarzı: Kartlar dikey ekranda 2 kademeli kavisli yelpaze olarak
-  /// çok büyük, net okunaklı ve parmakla sağa-sola kolayca sürüklenebilir!
-  Widget _buildInteractiveFanHand({
-    required List<CardModel> hand,
+  // ===========================================================================
+  // 3. ALT OYUNCU ELİ (TEK SIRA GENİŞ YELPAZE + 60 FPS SIFIR GECİKMELİ SÜRÜKLEME)
+  // ===========================================================================
+  Widget _buildZyngaBottomHandAndControls({
+    required GameService gs,
+    required TableStateModel table,
+    required SeatPlayerModel? mySeat,
+    required int mySeatIdx,
+    required bool isMyTurn,
+    required bool hasDrawn,
+    required bool isPlaying,
+  }) {
+    final meldedIds = table.meldedCardIds;
+    final canFinish = table.canFinishNow;
+    final deadwoodPoints = table.currentHandPenalty;
+
+    return Column(
+      children: [
+        // ÜST MİNİ DURUM BANDI (Elde Kalan Sayı & İpucu)
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 14),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 11, vertical: 3.5),
+                decoration: BoxDecoration(
+                  color: Colors.black.withValues(alpha: 0.72),
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(
+                    color: canFinish
+                        ? const Color(0xFF22C55E)
+                        : const Color(0xFFD4AF37).withValues(alpha: 0.65),
+                  ),
+                ),
+                child: Text(
+                  canFinish
+                      ? '✨ EL AÇMAYA HAZIR (0 CEZA)'
+                      : 'Elde Ceza: $deadwoodPoints Puan',
+                  style: TextStyle(
+                    color: canFinish
+                        ? const Color(0xFF4ADE80)
+                        : const Color(0xFFFDE047),
+                    fontWeight: FontWeight.w900,
+                    fontSize: 10.5,
+                  ),
+                ),
+              ),
+              const Text(
+                '↔ Parmağınızla Sürükleyerek Dizin',
+                style: TextStyle(
+                  color: Colors.white60,
+                  fontSize: 10,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+          ),
+        ),
+
+        // TEK SIRA GENİŞ KAVİSLİ YELPAZE KARTLAR (60 FPS SÜRÜKLEME)
+        Expanded(
+          child: _localHand.isEmpty
+              ? Center(
+                  child: Text(
+                    mySeatIdx == -1
+                        ? 'Oynamak için masadaki boş bir koltuğa dokunun'
+                        : 'Yeni elin dağıtılması bekleniyor...',
+                    style: const TextStyle(color: Colors.white60, fontSize: 13),
+                  ),
+                )
+              : _buildSingleArcSmoothFanHand(
+                  table: table,
+                  meldedIds: meldedIds,
+                  lastDrawnCardId: gs.lastDrawnCardId,
+                ),
+        ),
+
+        // ZYNGA STİLİ 4'LÜ ALT AKSİYON BUTONLARI
+        // (DESTEDEN ÇEK | OTOMATİK DİZ | KAĞIDI AT | EL AÇ)
+        Padding(
+          padding: const EdgeInsets.fromLTRB(8, 2, 8, 6),
+          child: Row(
+            children: [
+              // 1. DESTEDEN ÇEK (Altın Buton)
+              Expanded(
+                child: _buildZynga3DButton(
+                  label: 'DESTEDEN\nÇEK',
+                  isGold: true,
+                  enabled: isPlaying && isMyTurn && !hasDrawn,
+                  glow: isPlaying && isMyTurn && !hasDrawn,
+                  onTap: () => gs.drawCard(),
+                ),
+              ),
+              const SizedBox(width: 6),
+
+              // 2. OTOMATİK DİZ (Zümrüt Buton)
+              Expanded(
+                child: _buildZynga3DButton(
+                  label: 'OTOMATİK\nDİZ',
+                  isGold: false,
+                  enabled: _localHand.isNotEmpty,
+                  onTap: () {
+                    SoundFx.playCardTap();
+                    gs.reorderHand();
+                  },
+                ),
+              ),
+              const SizedBox(width: 6),
+
+              // 3. KAĞIDI AT (Altın Buton)
+              Expanded(
+                child: _buildZynga3DButton(
+                  label: 'KAĞIDI\nAT',
+                  isGold: true,
+                  enabled: isPlaying &&
+                      isMyTurn &&
+                      hasDrawn &&
+                      _selectedCardId != null,
+                  glow: isPlaying &&
+                      isMyTurn &&
+                      hasDrawn &&
+                      _selectedCardId != null,
+                  onTap: () {
+                    if (_selectedCardId != null) {
+                      final idToDiscard = _selectedCardId!;
+                      setState(() {
+                        _selectedCardId = null;
+                        _localHand.removeWhere((c) => c.id == idToDiscard);
+                      });
+                      gs.discardCard(idToDiscard);
+                    }
+                  },
+                ),
+              ),
+              const SizedBox(width: 6),
+
+              // 4. EL AÇ (Zümrüt Parlak Buton)
+              Expanded(
+                child: _buildZynga3DButton(
+                  label: 'EL AÇ\nBİTİR',
+                  isGold: false,
+                  enabled: isPlaying && isMyTurn && canFinish,
+                  glow: isPlaying && isMyTurn && canFinish,
+                  onTap: () {
+                    gs.declareFinish(
+                      discardCardId:
+                          _selectedCardId ?? table.winningDiscardCardId,
+                    );
+                    setState(() => _selectedCardId = null);
+                  },
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// 60 FPS Sıfır Gecikmeli Tek Sıra Geniş Yelpaze Kart Dizilimi
+  Widget _buildSingleArcSmoothFanHand({
+    required TableStateModel table,
     required Set<String> meldedIds,
-    required int wildRank,
-    required String? winningDiscardCardId,
     required String? lastDrawnCardId,
   }) {
     return LayoutBuilder(
       builder: (context, constraints) {
         final maxW = constraints.maxWidth;
         final maxH = constraints.maxHeight;
+        final count = _localHand.length;
+        if (count == 0) return const SizedBox.shrink();
 
-        final int topCount = (hand.length / 2).ceil();
-        final int bottomCount = hand.length - topCount;
+        // Kart boyutları: Dikey ekranda büyük ve çok net
+        final double cardH = (maxH * 0.80).clamp(112.0, 146.0);
+        final double cardW = (cardH * 0.69).clamp(76.0, 100.0);
 
-        final double cardW = (maxW / 5.3).clamp(68.0, 86.0);
-        final double cardH = (cardW * 1.42).clamp(96.0, 122.0);
+        // Tek sırada tüm ekran genişliğine yayılan yelpaze adımı
+        final double sideMargin = 10.0;
+        final double availableSpan = maxW - (sideMargin * 2) - cardW;
+        final double stepX = count > 1
+            ? (availableSpan / (count - 1)).clamp(24.0, cardW * 0.82)
+            : 0.0;
+        final double totalWidth = cardW + stepX * (count - 1);
+        final double startX = (maxW - totalWidth) / 2;
 
-        Widget buildRow(int startIdx, int count) {
-          if (count <= 0) return const SizedBox.shrink();
-          final overlapStep = count > 1
-              ? ((maxW - 22 - cardW) / (count - 1)).clamp(38.0, cardW + 6.0)
-              : cardW;
-          final totalRowWidth = cardW + overlapStep * (count - 1);
-          final startX = (maxW - totalRowWidth) / 2;
+        return GestureDetector(
+          behavior: HitTestBehavior.translucent,
+          onHorizontalDragStart: (details) {
+            final localX = details.localPosition.dx;
+            // Dokunulan X koordinatına en yakın üstteki kartı bul
+            int hitIdx = -1;
+            for (int i = count - 1; i >= 0; i--) {
+              final left = startX + i * stepX;
+              if (localX >= left && localX <= left + cardW) {
+                hitIdx = i;
+                break;
+              }
+            }
+            hitIdx = hitIdx == -1
+                ? ((localX - startX) / (stepX > 0 ? stepX : 1))
+                    .round()
+                    .clamp(0, count - 1)
+                : hitIdx;
 
-          return SizedBox(
+            SoundFx.playCardTap();
+            setState(() {
+              _draggingCardId = _localHand[hitIdx].id;
+              _selectedCardId = _draggingCardId;
+              _dragFingerX = localX;
+            });
+          },
+          onHorizontalDragUpdate: (details) {
+            if (_draggingCardId == null) return;
+            final fingerX = details.localPosition.dx.clamp(0.0, maxW);
+            final currentIdx =
+                _localHand.indexWhere((c) => c.id == _draggingCardId);
+            if (currentIdx == -1) return;
+
+            final targetIdx = stepX > 0
+                ? ((fingerX - startX - cardW * 0.35) / stepX)
+                    .round()
+                    .clamp(0, count - 1)
+                : 0;
+
+            setState(() {
+              _dragFingerX = fingerX;
+              if (targetIdx != currentIdx) {
+                final moved = _localHand.removeAt(currentIdx);
+                _localHand.insert(targetIdx, moved);
+                HapticFeedback.selectionClick();
+              }
+            });
+          },
+          onHorizontalDragEnd: (_) {
+            if (_draggingCardId == null) return;
+            final orderedIds = _localHand.map((c) => c.id).toList();
+            setState(() {
+              _draggingCardId = null;
+            });
+            // Sadece parmak kalktığında sunucuya tek paket gönderilir -> 0 gecikme!
+            GameService.instance.reorderHand(orderedCardIds: orderedIds);
+          },
+          child: SizedBox(
             width: maxW,
-            height: cardH + 20,
+            height: maxH,
             child: Stack(
               clipBehavior: Clip.none,
-              children: List.generate(count, (localIdx) {
-                final globalIdx = startIdx + localIdx;
-                final card = hand[globalIdx];
+              children: List.generate(count, (idx) {
+                final card = _localHand[idx];
                 final cardId = card.id;
+                final isDragging = _draggingCardId == cardId;
                 final isSelected = _selectedCardId == cardId;
-                final isBeingDragged = _draggingIndex == globalIdx;
                 final isMelded = meldedIds.contains(cardId);
                 final isNewlyDrawn = lastDrawnCardId == cardId;
-                final isWinningDiscard = winningDiscardCardId == cardId;
+                final isWinningDiscard = table.winningDiscardCardId == cardId;
 
-                // Hafif Batak HD yelpaze kavisi
-                final normalized =
-                    count > 1 ? (localIdx / (count - 1)) - 0.5 : 0.0;
-                final angle = normalized * 0.13;
-                final arcY = (normalized * normalized) * 9.0;
+                // Zynga tarzı yumuşak kavisli yelpaze açısı ve yüksekliği
+                final double norm =
+                    count > 1 ? (idx / (count - 1)) - 0.5 : 0.0; // -0.5 .. +0.5
+                final double angle = isDragging ? 0.0 : norm * 0.28;
+                final double curveY = (norm * norm) * 28.0;
+
+                final double targetLeft = isDragging
+                    ? (_dragFingerX - cardW / 2).clamp(2.0, maxW - cardW - 2.0)
+                    : startX + (idx * stepX);
+                final double targetTop =
+                    (maxH - cardH - 12) + curveY - (isSelected ? 18 : 0);
 
                 return AnimatedPositioned(
                   key: ValueKey(cardId),
-                  duration: Duration(milliseconds: isBeingDragged ? 0 : 180),
+                  duration: Duration(milliseconds: isDragging ? 0 : 120),
                   curve: Curves.easeOutCubic,
-                  left: startX + (localIdx * overlapStep),
-                  top: 8 + arcY - (isSelected ? 12 : 0),
+                  left: targetLeft,
+                  top: targetTop,
                   child: GestureDetector(
-                    behavior: HitTestBehavior.opaque,
                     onTap: () {
                       SoundFx.playCardTap();
                       setState(() {
-                        if (_selectedCardId == null) {
-                          _selectedCardId = cardId;
-                        } else if (_selectedCardId == cardId) {
-                          _selectedCardId = null;
-                        } else {
-                          final oldIdx = hand.indexWhere(
-                            (c) => c.id == _selectedCardId,
-                          );
-                          if (oldIdx != -1) {
-                            _swapLocalHandCards(hand, oldIdx, globalIdx);
+                        if (_selectedCardId == cardId) {
+                          // Seçili karta tekrar dokunulursa ve sıra bizdeyse doğrudan at!
+                          if (table.status == 'playing' &&
+                              table.currentTurnSeat ==
+                                  table.seats.indexWhere(
+                                    (s) =>
+                                        s?.userId ==
+                                        GameService.instance.currentUser?.id,
+                                  ) &&
+                              table.hasDrawnThisTurn) {
+                            _selectedCardId = null;
+                            _localHand.removeWhere((c) => c.id == cardId);
+                            GameService.instance.discardCard(cardId);
+                          } else {
+                            _selectedCardId = null;
                           }
+                        } else {
                           _selectedCardId = cardId;
                         }
-                      });
-                    },
-                    onPanStart: (_) {
-                      SoundFx.playCardTap();
-                      setState(() {
-                        _draggingIndex = globalIdx;
-                        _selectedCardId = cardId;
-                        _dragAccumulatedDx = 0;
-                      });
-                    },
-                    onPanUpdate: (details) {
-                      if (_draggingIndex == null) return;
-                      _dragAccumulatedDx += details.delta.dx;
-                      const threshold = 34.0;
-                      if (_dragAccumulatedDx.abs() >= threshold) {
-                        final dir = _dragAccumulatedDx > 0 ? 1 : -1;
-                        final targetIdx =
-                            (_draggingIndex! + dir).clamp(0, hand.length - 1);
-                        if (targetIdx != _draggingIndex) {
-                          _swapLocalHandCards(hand, _draggingIndex!, targetIdx);
-                          setState(() {
-                            _draggingIndex = targetIdx;
-                            _dragAccumulatedDx = 0;
-                          });
-                        }
-                      }
-                    },
-                    onPanEnd: (_) {
-                      setState(() {
-                        _draggingIndex = null;
-                        _dragAccumulatedDx = 0;
                       });
                     },
                     child: Transform.rotate(
                       angle: angle,
-                      child: PlayingCardWidget(
-                        card: card,
-                        wildRank: wildRank,
-                        width: cardW,
-                        height: cardH,
-                        isSelected: isSelected || isBeingDragged,
-                        isMelded: isMelded,
-                        isNewlyDrawn: isNewlyDrawn,
-                        isWinningDiscardCandidate: isWinningDiscard,
+                      child: Transform.scale(
+                        scale: isDragging ? 1.08 : 1.0,
+                        child: PlayingCardWidget(
+                          card: card,
+                          wildRank: table.wildRank,
+                          width: cardW,
+                          height: cardH,
+                          isSelected: isSelected || isDragging,
+                          isMelded: isMelded,
+                          isNewlyDrawn: isNewlyDrawn,
+                          isWinningDiscardCandidate: isWinningDiscard,
+                        ),
                       ),
                     ),
                   ),
                 );
               }),
-            ),
-          );
-        }
-
-        return SingleChildScrollView(
-          physics: const NeverScrollableScrollPhysics(),
-          child: SizedBox(
-            height: maxH,
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                buildRow(0, topCount),
-                Transform.translate(
-                  offset: const Offset(0, -14),
-                  child: buildRow(topCount, bottomCount),
-                ),
-              ],
             ),
           ),
         );
@@ -1541,8 +1746,84 @@ class _TableScreenState extends State<TableScreen> {
     );
   }
 
+  /// Zynga UI Mockup'ındaki 3D Altın ve Zümrüt Çerçeveli Aksiyon Butonları
+  Widget _buildZynga3DButton({
+    required String label,
+    required bool isGold,
+    required bool enabled,
+    required VoidCallback onTap,
+    bool glow = false,
+  }) {
+    final List<Color> gradientColors = !enabled
+        ? [const Color(0xFF1F2937), const Color(0xFF111827)]
+        : isGold
+            ? [
+                const Color(0xFFFDE047),
+                const Color(0xFFD97706),
+                const Color(0xFF92400E),
+              ]
+            : [
+                const Color(0xFF10B981),
+                const Color(0xFF047857),
+                const Color(0xFF064E3B),
+              ];
+
+    return GestureDetector(
+      onTap: enabled ? onTap : null,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 180),
+        height: 46,
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: gradientColors,
+          ),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(
+            color: enabled ? const Color(0xFFFDE047) : Colors.white24,
+            width: glow ? 2.2 : 1.4,
+          ),
+          boxShadow: [
+            if (glow)
+              BoxShadow(
+                color: (isGold
+                        ? const Color(0xFFFACC15)
+                        : const Color(0xFF10B981))
+                    .withValues(alpha: 0.65),
+                blurRadius: 12,
+                spreadRadius: 1,
+              ),
+            const BoxShadow(
+              color: Colors.black87,
+              blurRadius: 6,
+              offset: Offset(0, 3),
+            ),
+          ],
+        ),
+        child: Center(
+          child: Text(
+            label,
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              color: !enabled
+                  ? Colors.white38
+                  : isGold
+                      ? const Color(0xFF1C1917)
+                      : Colors.white,
+              fontWeight: FontWeight.w900,
+              fontSize: 11,
+              height: 1.1,
+              letterSpacing: 0.3,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   // ===========================================================================
-  // 5. PROFESYONEL 101 PUAN TABLOSU & YENİDEN GİRİŞ (RE-BUY) MODALI
+  // 4. PROFESYONEL 101 PUAN TABLOSU & YENİDEN GİRİŞ (RE-BUY) MODALI
   // ===========================================================================
   Widget _buildScoreboardOverlay(
     TableStateModel table,
@@ -1551,13 +1832,11 @@ class _TableScreenState extends State<TableScreen> {
     bool isRoundEnd,
   ) {
     final gs = GameService.instance;
-    final seatedPlayers =
-        table.seats.whereType<SeatPlayerModel>().toList();
+    final seatedPlayers = table.seats.whereType<SeatPlayerModel>().toList();
     final showdownMap = {
       for (final s in table.lastShowdown) s.userId: s,
     };
-    final myShowdown =
-        mySeat != null ? showdownMap[mySeat.userId] : null;
+    final myShowdown = mySeat != null ? showdownMap[mySeat.userId] : null;
 
     return Positioned.fill(
       child: Container(
@@ -1581,7 +1860,6 @@ class _TableScreenState extends State<TableScreen> {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                // Başlık
                 Row(
                   children: [
                     const Icon(
@@ -1593,7 +1871,7 @@ class _TableScreenState extends State<TableScreen> {
                     Expanded(
                       child: Text(
                         isRoundEnd
-                            ? 'EL #${table.roundNumber} SONUCU & 101 TABLOSU'
+                            ? 'EL #${table.roundNumber} SONUCU (${table.turnRemainingSeconds}s)'
                             : '101 CEZA PUAN ÇİZELGESİ',
                         style: const TextStyle(
                           color: Colors.white,
@@ -1611,8 +1889,6 @@ class _TableScreenState extends State<TableScreen> {
                   ],
                 ),
                 const Divider(color: Colors.white12),
-
-                // Profesyonel Tablo Başlığı
                 Container(
                   padding: const EdgeInsets.symmetric(
                     horizontal: 10,
@@ -1675,8 +1951,6 @@ class _TableScreenState extends State<TableScreen> {
                   ),
                 ),
                 const SizedBox(height: 6),
-
-                // Oyuncu Satırları
                 Flexible(
                   child: ListView.separated(
                     shrinkWrap: true,
@@ -1796,61 +2070,35 @@ class _TableScreenState extends State<TableScreen> {
                     },
                   ),
                 ),
-
                 const SizedBox(height: 10),
                 Text(
                   'Toplam ${table.scoreHistory.length} el oynandı • Havuz: ${table.pot} Kredi',
                   style: const TextStyle(color: Colors.white54, fontSize: 11),
                 ),
-
-                // Eğer El Sonuysa: Yeniden Katıl (Re-buy) veya Sıradaki El Butonu
-                if (isRoundEnd && mySeat != null) ...[
+                if (isRoundEnd &&
+                    mySeat != null &&
+                    myShowdown != null &&
+                    myShowdown.canRebuy) ...[
                   const SizedBox(height: 12),
-                  if (myShowdown != null && myShowdown.canRebuy)
-                    Padding(
-                      padding: const EdgeInsets.only(bottom: 8),
-                      child: SizedBox(
-                        width: double.infinity,
-                        child: ElevatedButton.icon(
-                          onPressed: () => gs.rebuyIntoMatch(),
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: const Color(0xFFF59E0B),
-                            foregroundColor: Colors.black,
-                            padding: const EdgeInsets.symmetric(vertical: 12),
-                          ),
-                          icon: const Icon(Icons.replay_circle_filled),
-                          label: Text(
-                            'OYUNA TEKRAR DAHİL OL (${myShowdown.rebuyMultiplier}x = ${myShowdown.rebuyCost} Kredi • ${myShowdown.rebuyTargetScore} Puanla)',
-                            style: const TextStyle(
-                              fontWeight: FontWeight.w900,
-                              fontSize: 11.5,
-                            ),
-                          ),
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton.icon(
+                      onPressed: () => gs.rebuyIntoMatch(),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color(0xFFF59E0B),
+                        foregroundColor: Colors.black,
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                      ),
+                      icon: const Icon(Icons.replay_circle_filled),
+                      label: Text(
+                        'OYUNA TEKRAR DAHİL OL (${myShowdown.rebuyMultiplier}x = ${myShowdown.rebuyCost} Kredi • ${myShowdown.rebuyTargetScore} Puanla)',
+                        style: const TextStyle(
+                          fontWeight: FontWeight.w900,
+                          fontSize: 11.5,
                         ),
                       ),
                     ),
-                  if (!mySeat.isEliminated)
-                    SizedBox(
-                      width: double.infinity,
-                      child: ElevatedButton.icon(
-                        onPressed: () => gs.toggleReady(),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: const Color(0xFF10B981),
-                          foregroundColor: Colors.black,
-                          padding: const EdgeInsets.symmetric(vertical: 12),
-                        ),
-                        icon: const Icon(Icons.skip_next_rounded),
-                        label: Text(
-                          mySeat.isReady
-                              ? 'HAZIRSINIZ (Diğerleri Bekleniyor...)'
-                              : 'SIRADAKİ EL İÇİN HAZIRIM',
-                          style: const TextStyle(
-                            fontWeight: FontWeight.w900,
-                            fontSize: 12.5,
-                          ),
-                        ),
-                      ),
-                    ),
+                  ),
                 ],
               ],
             ),
@@ -1861,15 +2109,15 @@ class _TableScreenState extends State<TableScreen> {
   }
 
   // ===========================================================================
-  // 6. MAÇ SONU ŞAMPİYON OVERLAY (KAPATILABİLİR, KOLTUKLARI ASLA ENGELLEMEZ!)
+  // 5. MAÇ SONU ŞAMPİYON OVERLAY
   // ===========================================================================
   Widget _buildMatchFinishedOverlay(
     TableStateModel table,
     int mySeatIdx,
   ) {
     final winner = table.lastWinnerInfo!;
-    final winnerName = winner['winnerUsername'] ?? 'Şampiyon';
-    final prize = winner['winnerPrize'] ?? 0;
+    final winnerName = winner['username'] ?? 'Şampiyon';
+    final prize = winner['prizeWon'] ?? 0;
     final totalPot = winner['totalPot'] ?? 0;
 
     return Positioned.fill(
@@ -1993,7 +2241,7 @@ class _TableScreenState extends State<TableScreen> {
   }
 
   // ===========================================================================
-  // 7. EFEKT GÖNDERME VE SOHBET ÇEKMECESİ
+  // 6. EFEKT GÖNDERME VE SOHBET ÇEKMECESİ
   // ===========================================================================
   void _showEffectPickerDialog(String targetUserId, String targetName) {
     final cost = GameService.instance.emojiCost;
@@ -2108,7 +2356,7 @@ class _TableScreenState extends State<TableScreen> {
               border: Border.all(color: const Color(0xFFF59E0B)),
             ),
             child: Text(
-              '$emoji  ${eff['fromUsername']} ➔ ${eff['targetUsername']}',
+              '$emoji  ${eff['senderUsername'] ?? eff['fromUsername']} ➔ ${eff['effectName'] ?? ''}',
               style: const TextStyle(
                 color: Colors.white,
                 fontWeight: FontWeight.bold,

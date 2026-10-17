@@ -195,6 +195,20 @@ class GameService extends ChangeNotifier {
       }
     });
 
+    _socket!.on('table_timer_tick', (data) {
+      if (data is Map && activeTable != null) {
+        if (data['tableId']?.toString() == activeTable!.id) {
+          activeTable!.turnRemainingSeconds =
+              int.tryParse(data['turnRemainingSeconds']?.toString() ?? '0') ??
+                  activeTable!.turnRemainingSeconds;
+          activeTable!.matchElapsedSeconds =
+              int.tryParse(data['matchElapsedSeconds']?.toString() ?? '0') ??
+                  activeTable!.matchElapsedSeconds;
+          notifyListeners();
+        }
+      }
+    });
+
     _socket!.on('voice_ptt_stream', (data) {
       if (data is Map) {
         final speaking = data['isSpeaking'] == true;
@@ -204,18 +218,33 @@ class GameService extends ChangeNotifier {
 
         activeVoiceSpeakerUsername = speaking ? speakerName : null;
 
-        // Başka bir oyuncudan gelen ses kaydını hoparlörden çal!
-        if (audioB64 != null &&
-            audioB64.isNotEmpty &&
-            senderId != currentUser?.id) {
-          activeVoiceSpeakerUsername = speakerName;
-          SoundFx.playIncomingVoiceBase64(audioB64);
-          Future.delayed(const Duration(seconds: 3), () {
-            if (activeVoiceSpeakerUsername == speakerName) {
-              activeVoiceSpeakerUsername = null;
-              notifyListeners();
+        if (audioB64 != null && audioB64.isNotEmpty) {
+          final isMe = senderId == currentUser?.id;
+          final seatedOthers = activeTable?.seats
+                  .where((s) => s != null && s.userId != currentUser?.id)
+                  .length ??
+              0;
+
+          // Başka bir oyuncudan geldiyse VEYA kullanıcı masada tek başına mikrofon testi yapıyorsa hoparlörden çal!
+          if (!isMe || seatedOthers == 0) {
+            activeVoiceSpeakerUsername = speakerName;
+            if (isMe && seatedOthers == 0) {
+              toastStreamController.add(
+                '🔊 Ses Testi: Masada tek olduğunuz için sesiniz size dinletiliyor.',
+              );
             }
-          });
+            Future.delayed(Duration(milliseconds: isMe ? 300 : 10), () {
+              SoundFx.playIncomingVoiceBase64(audioB64);
+            });
+            Future.delayed(const Duration(seconds: 4), () {
+              if (activeVoiceSpeakerUsername == speakerName) {
+                activeVoiceSpeakerUsername = null;
+                notifyListeners();
+              }
+            });
+          } else {
+            toastStreamController.add('🎙️ Sesli mesajınız masaya iletildi.');
+          }
         }
 
         notifyListeners();

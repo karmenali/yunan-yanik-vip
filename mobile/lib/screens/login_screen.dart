@@ -131,7 +131,7 @@ class _LoginScreenState extends State<LoginScreen> {
                     ),
                     const SizedBox(height: 18),
                     const Text(
-                      'ROYAL KULÜP',
+                      'YUNAN YANIK VIP',
                       style: TextStyle(
                         color: Color(0xFFFDE047),
                         fontSize: 28,
@@ -141,7 +141,7 @@ class _LoginScreenState extends State<LoginScreen> {
                     ),
                     const SizedBox(height: 4),
                     const Text(
-                      'YUNAN YANIK & VIP OYUN MERKEZİ',
+                      'GERÇEK ZAMANLI ÇOK OYUNCULU KULÜP',
                       textAlign: TextAlign.center,
                       style: TextStyle(
                         color: Colors.white70,

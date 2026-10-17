@@ -791,49 +791,51 @@ class _LobbyScreenState extends State<LobbyScreen> {
               ),
             ),
 
-            // 2. OYUN KULÜBÜ VİTRİNİ
+            // 2. YUNAN YANIK VIP ÖZEL KULÜP BANNER
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 10, 16, 4),
-              child: SizedBox(
-                height: 62,
-                child: ListView(
-                  scrollDirection: Axis.horizontal,
+              child: Container(
+                width: double.infinity,
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                decoration: BoxDecoration(
+                  gradient: const LinearGradient(
+                    colors: [Color(0xFF1A563B), Color(0xFF0A2418)],
+                  ),
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(
+                    color: const Color(0xFFD4AF37).withValues(alpha: 0.75),
+                    width: 1.4,
+                  ),
+                ),
+                child: const Row(
                   children: [
-                    _buildGameHubChip(
-                      icon: '🃏',
-                      title: 'Yunan Yanık VIP',
-                      subtitle: '${tables.length} Açık Masa',
-                      isActive: true,
-                      onTap: () {},
-                    ),
-                    _buildGameHubChip(
-                      icon: '🎲',
-                      title: '101 Okey VIP',
-                      subtitle: 'Yakında',
-                      isActive: false,
-                      onTap: () {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(
-                            content: Text('101 Okey VIP çok yakında kulüpte!'),
-                            duration: Duration(seconds: 2),
+                    Text('👑', style: TextStyle(fontSize: 22)),
+                    SizedBox(width: 10),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'YUNAN YANIK VIP SALONU',
+                            style: TextStyle(
+                              color: Color(0xFFFDE047),
+                              fontWeight: FontWeight.w900,
+                              fontSize: 13,
+                              letterSpacing: 0.6,
+                            ),
                           ),
-                        );
-                      },
-                    ),
-                    _buildGameHubChip(
-                      icon: '♠️',
-                      title: 'Batak HD Kulüp',
-                      subtitle: 'Yakında',
-                      isActive: false,
-                      onTap: () {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(
-                            content:
-                                Text('Batak HD Kulüp çok yakında eklenecek!'),
-                            duration: Duration(seconds: 2),
+                          SizedBox(height: 2),
+                          Text(
+                            '106 Kağıt • Gösterge Jokeri • Tek Seferde El Aç • 101 Yanık & Re-buy',
+                            style: TextStyle(
+                              color: Colors.white70,
+                              fontSize: 11,
+                              fontWeight: FontWeight.w600,
+                            ),
                           ),
-                        );
-                      },
+                        ],
+                      ),
                     ),
                   ],
                 ),
@@ -1124,62 +1126,5 @@ class _LobbyScreenState extends State<LobbyScreen> {
       ),
     );
   }
-
-  Widget _buildGameHubChip({
-    required String icon,
-    required String title,
-    required String subtitle,
-    required bool isActive,
-    required VoidCallback onTap,
-  }) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        margin: const EdgeInsets.only(right: 10),
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-        decoration: BoxDecoration(
-          gradient: isActive
-              ? const LinearGradient(
-                  colors: [Color(0xFF1A563B), Color(0xFF0E3322)],
-                )
-              : null,
-          color: isActive ? null : Colors.black26,
-          borderRadius: BorderRadius.circular(14),
-          border: Border.all(
-            color: isActive ? const Color(0xFFFACC15) : Colors.white24,
-            width: isActive ? 1.8 : 1,
-          ),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(icon, style: const TextStyle(fontSize: 24)),
-            const SizedBox(width: 8),
-            Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Text(
-                  title,
-                  style: TextStyle(
-                    color: isActive ? Colors.white : Colors.white70,
-                    fontWeight: FontWeight.bold,
-                    fontSize: 12.5,
-                  ),
-                ),
-                Text(
-                  subtitle,
-                  style: TextStyle(
-                    color: isActive ? const Color(0xFFFDE047) : Colors.white38,
-                    fontSize: 10.5,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ],
-            ),
-          ],
-        ),
-      ),
-    );
-  }
 }
+

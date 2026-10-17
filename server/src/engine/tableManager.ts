@@ -69,6 +69,7 @@ export interface GameTable {
   dealerSeat: number;
   hasDrawnThisTurn: boolean;
   turnDeadline: number;
+  matchStartedAt: number;
   turnTimer?: NodeJS.Timeout;
   phaseTimer?: NodeJS.Timeout;
   activePlayersAtRoundStart: number;
@@ -101,6 +102,32 @@ export class TableManager {
   constructor(io: Server) {
     this.io = io;
     this.seedDefaultTables();
+    // Her 1 saniyede bir aktif masalara canlı sayaç (hamle kalan süre + toplam maç süresi) gönder
+    setInterval(() => this.tickActiveTables(), 1000);
+  }
+
+  private tickActiveTables() {
+    const now = Date.now();
+    for (const table of this.tables.values()) {
+      if (table.status === 'playing' || table.status === 'round_summary') {
+        const turnRemainingSeconds = Math.max(
+          0,
+          Math.ceil((table.turnDeadline - now) / 1000)
+        );
+        const matchElapsedSeconds =
+          table.matchStartedAt > 0
+            ? Math.max(0, Math.floor((now - table.matchStartedAt) / 1000))
+            : 0;
+
+        this.io.to(`table:${table.id}`).emit('table_timer_tick', {
+          tableId: table.id,
+          status: table.status,
+          currentTurnSeat: table.currentTurnSeat,
+          turnRemainingSeconds,
+          matchElapsedSeconds,
+        });
+      }
+    }
   }
 
   private seedDefaultTables() {
@@ -200,6 +227,7 @@ export class TableManager {
       dealerSeat: 0,
       hasDrawnThisTurn: false,
       turnDeadline: 0,
+      matchStartedAt: 0,
       activePlayersAtRoundStart: 0,
       lastShowdown: null,
       scoreHistory: [],
@@ -436,6 +464,7 @@ export class TableManager {
     table.status = 'playing';
     table.pot = collectedPot;
     table.roundNumber = 0;
+    table.matchStartedAt = Date.now();
     table.scoreHistory = [];
     table.lastWinnerInfo = null;
     table.lastShowdown = null;
@@ -1090,6 +1119,10 @@ export class TableManager {
         0,
         Math.ceil((table.turnDeadline - Date.now()) / 1000)
       ),
+      matchElapsedSeconds:
+        table.matchStartedAt > 0
+          ? Math.max(0, Math.floor((Date.now() - table.matchStartedAt) / 1000))
+          : 0,
       seats: table.seats.map((s) => {
         if (!s) return null;
         return {

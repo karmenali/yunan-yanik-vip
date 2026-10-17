@@ -17,10 +17,15 @@ class SoundFx {
   static final AudioRecorder _recorder = AudioRecorder();
   static bool _isRecording = false;
 
+  static bool get isRecording => _isRecording;
+
   static Future<void> init() async {
     final prefs = await SharedPreferences.getInstance();
     soundEnabled = prefs.getBool('sound_enabled') ?? true;
     voiceEnabled = prefs.getBool('voice_enabled') ?? true;
+    await _sfxPlayer.setReleaseMode(ReleaseMode.stop);
+    await _voicePlayer.setReleaseMode(ReleaseMode.stop);
+    await _voicePlayer.setVolume(1.0);
   }
 
   static Future<void> setSoundEnabled(bool val) async {
@@ -35,7 +40,7 @@ class SoundFx {
     await prefs.setBool('voice_enabled', val);
   }
 
-  /// Bellek içinde 16-bit PCM WAV ses dalgası üretir (Harici ses dosyasına ihtiyaç duymaz)
+  /// Harici ses dosyasına ihtiyaç duymadan bellek içinde 16-bit PCM WAV ses dalgası üretir.
   static Uint8List _generateToneWav({
     required double startFreq,
     required double endFreq,
@@ -44,10 +49,11 @@ class SoundFx {
   }) {
     const int sampleRate = 22050;
     final int numSamples = ((sampleRate * durationMs) / 1000).round();
-    final int dataSize = numSamples * 2;
+    final int dataSize = numSamples * 2; // 16-bit mono
+    final int fileSize = 36 + dataSize;
+
     final ByteData buffer = ByteData(44 + dataSize);
 
-    // RIFF başlığı
     void writeString(int offset, String s) {
       for (int i = 0; i < s.length; i++) {
         buffer.setUint8(offset + i, s.codeUnitAt(i));
@@ -55,12 +61,12 @@ class SoundFx {
     }
 
     writeString(0, 'RIFF');
-    buffer.setUint32(4, 36 + dataSize, Endian.little);
+    buffer.setUint32(4, fileSize, Endian.little);
     writeString(8, 'WAVE');
     writeString(12, 'fmt ');
     buffer.setUint32(16, 16, Endian.little); // PCM
     buffer.setUint16(20, 1, Endian.little); // Format = 1
-    buffer.setUint16(22, 1, Endian.little); // Tek kanal (Mono)
+    buffer.setUint16(22, 1, Endian.little); // Mono
     buffer.setUint32(24, sampleRate, Endian.little);
     buffer.setUint32(28, sampleRate * 2, Endian.little);
     buffer.setUint16(32, 2, Endian.little);
@@ -72,7 +78,6 @@ class SoundFx {
     for (int i = 0; i < numSamples; i++) {
       final double progress = i / numSamples;
       final double freq = startFreq + (endFreq - startFreq) * progress;
-      // Yumuşak zarf (Attack & Decay)
       final double envelope = math.sin(progress * math.pi);
       phase += (2 * math.pi * freq) / sampleRate;
       final double sample = math.sin(phase) * volume * envelope;
@@ -91,7 +96,7 @@ class SoundFx {
         startFreq: urgent ? 1240 : 880,
         endFreq: urgent ? 1320 : 880,
         durationMs: urgent ? 140 : 100,
-        volume: 0.7,
+        volume: 0.75,
       );
       await _sfxPlayer.stop();
       await _sfxPlayer.play(BytesSource(wav));
@@ -103,6 +108,36 @@ class SoundFx {
     } catch (_) {}
   }
 
+  /// Telsiz konuşma başlangıç bip sesi
+  static Future<void> playPttStartBeep() async {
+    try {
+      final wav = _generateToneWav(
+        startFreq: 680,
+        endFreq: 1020,
+        durationMs: 85,
+        volume: 0.55,
+      );
+      await _sfxPlayer.stop();
+      await _sfxPlayer.play(BytesSource(wav));
+      await HapticFeedback.mediumImpact();
+    } catch (_) {}
+  }
+
+  /// Telsiz konuşma bitiş / gönderim bip sesi
+  static Future<void> playPttEndBeep() async {
+    try {
+      final wav = _generateToneWav(
+        startFreq: 980,
+        endFreq: 620,
+        durationMs: 90,
+        volume: 0.55,
+      );
+      await _sfxPlayer.stop();
+      await _sfxPlayer.play(BytesSource(wav));
+      await HapticFeedback.lightImpact();
+    } catch (_) {}
+  }
+
   /// Kağıt seçme / dizme sesi
   static Future<void> playCardTap() async {
     if (!soundEnabled) return;
@@ -110,7 +145,7 @@ class SoundFx {
       final wav = _generateToneWav(
         startFreq: 520,
         endFreq: 680,
-        durationMs: 45,
+        durationMs: 40,
         volume: 0.35,
       );
       await _sfxPlayer.stop();
@@ -119,12 +154,12 @@ class SoundFx {
     } catch (_) {}
   }
 
-  /// Desteden kağıt çekme akıcı ses efekti
+  /// Desteden kağıt çekme ("Şırak") sesi
   static Future<void> playCardDraw() async {
     if (!soundEnabled) return;
     try {
       final wav = _generateToneWav(
-        startFreq: 380,
+        startFreq: 340,
         endFreq: 760,
         durationMs: 95,
         volume: 0.5,
@@ -140,9 +175,9 @@ class SoundFx {
     if (!soundEnabled) return;
     try {
       final wav = _generateToneWav(
-        startFreq: 660,
-        endFreq: 320,
-        durationMs: 80,
+        startFreq: 620,
+        endFreq: 280,
+        durationMs: 90,
         volume: 0.5,
       );
       await _sfxPlayer.stop();
@@ -151,49 +186,54 @@ class SoundFx {
     } catch (_) {}
   }
 
-  /// Zafer / El açma / Efekt uyarısı
+  /// El açma / kazanma zafer sesi
   static Future<void> playCelebration() async {
     if (!soundEnabled) return;
     try {
       final wav = _generateToneWav(
-        startFreq: 523.25,
-        endFreq: 1046.5,
-        durationMs: 240,
+        startFreq: 523.25, // C5
+        endFreq: 1046.50, // C6
+        durationMs: 280,
         volume: 0.65,
       );
       await _sfxPlayer.stop();
       await _sfxPlayer.play(BytesSource(wav));
-      await HapticFeedback.vibrate();
+      await HapticFeedback.heavyImpact();
     } catch (_) {}
   }
 
   // ==========================================
-  // 🎙️ BAS-KONUŞ (WALKIE-TALKIE) SES KAYIT VE OYNATMA
+  // 🎙️ BAS-KONUŞ & DOKUN-KONUŞ (16kHz PCM WAV - SIFIR GECİKME)
   // ==========================================
 
   static Future<bool> startPttRecording() async {
-    if (!voiceEnabled || _isRecording) return false;
+    if (!voiceEnabled) return false;
+    if (_isRecording) return true;
     try {
-      if (await _recorder.hasPermission()) {
-        final tempDir = await getTemporaryDirectory();
-        final filePath =
-            '${tempDir.path}/ptt_${DateTime.now().millisecondsSinceEpoch}.m4a';
+      final hasPerm = await _recorder.hasPermission();
+      if (!hasPerm) return false;
 
-        await _recorder.start(
-          const RecordConfig(
-            encoder: AudioEncoder.aacLc,
-            bitRate: 32000,
-            sampleRate: 16000,
-            numChannels: 1,
-          ),
-          path: filePath,
-        );
-        _isRecording = true;
-        await HapticFeedback.mediumImpact();
-        return true;
-      }
-    } catch (_) {}
-    return false;
+      await playPttStartBeep();
+
+      final tempDir = await getTemporaryDirectory();
+      final filePath =
+          '${tempDir.path}/ptt_${DateTime.now().millisecondsSinceEpoch}.wav';
+
+      // WAV (16-bit PCM, 16kHz Mono) tüm Android cihazlarda 0 ms kodek gecikmesiyle çalışır
+      await _recorder.start(
+        const RecordConfig(
+          encoder: AudioEncoder.wav,
+          sampleRate: 16000,
+          numChannels: 1,
+        ),
+        path: filePath,
+      );
+      _isRecording = true;
+      return true;
+    } catch (_) {
+      _isRecording = false;
+      return false;
+    }
   }
 
   static Future<String?> stopPttRecordingAndGetBase64() async {
@@ -201,12 +241,14 @@ class SoundFx {
     _isRecording = false;
     try {
       final path = await _recorder.stop();
+      await playPttEndBeep();
       if (path != null) {
         final file = File(path);
         if (await file.exists()) {
           final bytes = await file.readAsBytes();
           await file.delete().catchError((_) => file);
-          if (bytes.length > 100) {
+          // Geçerli bir WAV ses kaydı (44 byte başlık + en az 800 byte ses verisi)
+          if (bytes.length > 800) {
             return base64Encode(bytes);
           }
         }
@@ -219,13 +261,22 @@ class SoundFx {
     if (!voiceEnabled || base64Audio.isEmpty) return;
     try {
       final bytes = base64Decode(base64Audio);
-      final tempDir = await getTemporaryDirectory();
-      final tempFile = File(
-        '${tempDir.path}/rx_${DateTime.now().millisecondsSinceEpoch}.m4a',
-      );
-      await tempFile.writeAsBytes(bytes, flush: true);
+      if (bytes.length <= 44) return;
       await _voicePlayer.stop();
-      await _voicePlayer.play(DeviceFileSource(tempFile.path));
-    } catch (_) {}
+      await _voicePlayer.setVolume(1.0);
+      // WAV baytlarını doğrudan RAM'den (BytesSource) anında çalar!
+      await _voicePlayer.play(BytesSource(bytes));
+    } catch (_) {
+      // Fallback: Cihaz BytesSource desteklemezse geçici dosyadan çal
+      try {
+        final bytes = base64Decode(base64Audio);
+        final tempDir = await getTemporaryDirectory();
+        final tempFile = File(
+          '${tempDir.path}/rx_${DateTime.now().millisecondsSinceEpoch}.wav',
+        );
+        await tempFile.writeAsBytes(bytes, flush: true);
+        await _voicePlayer.play(DeviceFileSource(tempFile.path));
+      } catch (_) {}
+    }
   }
 }

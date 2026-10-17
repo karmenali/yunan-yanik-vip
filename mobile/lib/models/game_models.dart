@@ -253,7 +253,8 @@ class TableStateModel {
   final int currentTurnSeat;
   final int dealerSeat;
   final bool hasDrawnThisTurn;
-  final int turnRemainingSeconds;
+  int turnRemainingSeconds;
+  int matchElapsedSeconds;
   final List<SeatPlayerModel?> seats;
   final List<CardModel> myHand;
   final bool canFinishNow;
@@ -282,6 +283,7 @@ class TableStateModel {
     required this.dealerSeat,
     required this.hasDrawnThisTurn,
     required this.turnRemainingSeconds,
+    this.matchElapsedSeconds = 0,
     required this.seats,
     required this.myHand,
     required this.canFinishNow,
@@ -338,6 +340,8 @@ class TableStateModel {
       hasDrawnThisTurn: json['hasDrawnThisTurn'] == true,
       turnRemainingSeconds:
           int.tryParse(json['turnRemainingSeconds']?.toString() ?? '30') ?? 30,
+      matchElapsedSeconds:
+          int.tryParse(json['matchElapsedSeconds']?.toString() ?? '0') ?? 0,
       seats: seats,
       myHand: myHand,
       canFinishNow: evalMap?['canFinish'] == true,
