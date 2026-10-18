@@ -157,20 +157,18 @@ class PlayingCardWidget extends StatelessWidget {
             ),
 
             // YARDIMLI MODDA GÖSTERGE JOKERİ TAÇ İŞARETİ (Yardımsız modda asla görünmez!)
-            if (showAsWild && (isPhysicalJoker || showWildHints))
+            if (isIndicatorWild && showWildHints)
               Positioned(
                 top: 3,
                 right: 3,
                 child: Container(
                   padding: const EdgeInsets.symmetric(horizontal: 3.5, vertical: 1),
                   decoration: BoxDecoration(
-                    color: isPhysicalJoker
-                        ? const Color(0xFF6D28D9)
-                        : const Color(0xFFD97706),
+                    color: const Color(0xFFD97706),
                     borderRadius: BorderRadius.circular(4),
                   ),
                   child: Text(
-                    isPhysicalJoker ? 'JKR' : '👑',
+                    '👑',
                     style: TextStyle(
                       color: Colors.white,
                       fontSize: (width * 0.125).clamp(6.5, 8.5),
@@ -237,24 +235,27 @@ class PlayingCardWidget extends StatelessWidget {
     required double cornerSuitSize,
   }) {
     if (isPhysicalJoker) {
+      final double jokerLetterSize = (width * 0.125).clamp(5.8, 8.8);
       return Column(
         mainAxisSize: MainAxisSize.min,
         children: [
           Text(
-            'J',
-            style: TextStyle(
-              color: suitColor,
-              fontSize: rankFontSize * 0.92,
-              fontWeight: FontWeight.w900,
-              height: 0.95,
-            ),
-          ),
-          Text(
             '★',
             style: TextStyle(
               color: const Color(0xFFD97706),
-              fontSize: cornerSuitSize * 0.9,
-              height: 0.95,
+              fontSize: jokerLetterSize * 1.15,
+              fontWeight: FontWeight.w900,
+              height: 0.9,
+            ),
+          ),
+          Text(
+            'J\nO\nK\nE\nR',
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              color: const Color(0xFFB91C1C),
+              fontSize: jokerLetterSize,
+              fontWeight: FontWeight.w900,
+              height: 0.92,
             ),
           ),
         ],
@@ -294,27 +295,14 @@ class PlayingCardWidget extends StatelessWidget {
     required double centerArtSize,
   }) {
     if (isPhysicalJoker) {
-      return Container(
-        width: centerArtSize * 1.15,
-        height: centerArtSize * 1.15,
-        decoration: BoxDecoration(
-          shape: BoxShape.circle,
-          gradient: const LinearGradient(
-            colors: [Color(0xFF7C3AED), Color(0xFFD97706)],
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-          ),
-          boxShadow: [
-            BoxShadow(
-              color: const Color(0xFF7C3AED).withValues(alpha: 0.25),
-              blurRadius: 4,
-            ),
-          ],
-        ),
-        child: Center(
-          child: Text(
-            '🃏',
-            style: TextStyle(fontSize: centerArtSize * 0.68, height: 1.0),
+      return SizedBox(
+        width: width * 0.66,
+        height: height * 0.72,
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(5),
+          child: Image.asset(
+            'assets/images/joker_art.jpg',
+            fit: BoxFit.contain,
           ),
         ),
       );

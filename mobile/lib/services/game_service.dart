@@ -11,7 +11,13 @@ class GameService extends ChangeNotifier {
   static final GameService instance = GameService._internal();
   GameService._internal();
 
-  String _serverUrl = 'http://217.76.62.249:4545'; // Canlı Linux Oyun Sunucusu
+  static const List<String> _candidateServers = [
+    'http://217.76.62.249:4545', // 1. Canlı Bulut Oyun Sunucusu (VPS)
+    'http://192.168.1.5:4545', // 2. Yerel Ağ (Wi-Fi) Yedek Sunucu
+    'http://10.0.2.2:4545', // 3. Android Emülatör Yedek Sunucu
+  ];
+
+  String _serverUrl = 'http://217.76.62.249:4545';
   String? _token;
   UserModel? currentUser;
   int emojiCost = 10;
@@ -47,11 +53,26 @@ class GameService extends ChangeNotifier {
   Future<void> init() async {
     await SoundFx.init();
     final prefs = await SharedPreferences.getInstance();
-    final savedUrl = prefs.getString('server_url');
-    if (savedUrl != null && savedUrl.isNotEmpty) {
-      _serverUrl = savedUrl;
-    }
+    // Eski sürümlerden kalmış geçersiz IP kayıtlarını temizle, aktif sunucuyu otomatik tespit et
+    await prefs.remove('server_url');
+    await _resolveActiveServerUrl();
     notifyListeners();
+  }
+
+  /// Aday sunucuları paralel yoklayarak en hızlı yanıt veren aktif sunucuyu seçer
+  Future<String> _resolveActiveServerUrl() async {
+    for (final candidate in _candidateServers) {
+      try {
+        final res = await http
+            .get(Uri.parse('$candidate/api/health'))
+            .timeout(const Duration(milliseconds: 2800));
+        if (res.statusCode == 200) {
+          _serverUrl = candidate;
+          return _serverUrl;
+        }
+      } catch (_) {}
+    }
+    return _serverUrl;
   }
 
   Future<bool> tryAutoLogin() async {
@@ -60,10 +81,11 @@ class GameService extends ChangeNotifier {
       final savedToken = prefs.getString('jwt_token');
       if (savedToken == null || savedToken.isEmpty) return false;
 
+      await _resolveActiveServerUrl();
       final uri = Uri.parse('$_serverUrl/api/auth/me');
       final response = await http
           .get(uri, headers: {'Authorization': 'Bearer $savedToken'})
-          .timeout(const Duration(seconds: 6));
+          .timeout(const Duration(seconds: 5));
 
       if (response.statusCode != 200) {
         await prefs.remove('jwt_token');
@@ -93,20 +115,42 @@ class GameService extends ChangeNotifier {
       clean = 'http://$clean';
     }
     _serverUrl = clean;
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('server_url', _serverUrl);
     notifyListeners();
   }
 
   Future<void> login(String username, String password, {bool rememberMe = true}) async {
-    final uri = Uri.parse('$_serverUrl/api/auth/login');
-    final response = await http
-        .post(
-          uri,
-          headers: {'Content-Type': 'application/json'},
-          body: jsonEncode({'username': username.trim(), 'password': password}),
-        )
-        .timeout(const Duration(seconds: 10));
+    http.Response? response;
+    final orderedTargets = <String>[
+      _serverUrl,
+      ..._candidateServers.where((s) => s != _serverUrl),
+    ];
+
+    for (final baseUrl in orderedTargets) {
+      try {
+        final uri = Uri.parse('$baseUrl/api/auth/login');
+        final res = await http
+            .post(
+              uri,
+              headers: {'Content-Type': 'application/json'},
+              body: jsonEncode({
+                'username': username.trim(),
+                'password': password,
+              }),
+            )
+            .timeout(const Duration(seconds: 5));
+        _serverUrl = baseUrl;
+        response = res;
+        break;
+      } catch (_) {
+        // Bu uç nokta zaman aşımına uğradıysa sıradaki yedek sunucuyu dene
+      }
+    }
+
+    if (response == null) {
+      throw Exception(
+        'Oyun sunucusuna şu anda ulaşılamıyor (Bağlantı zaman aşımı). Lütfen internet bağlantınızı kontrol edip tekrar deneyin.',
+      );
+    }
 
     final data = jsonDecode(response.body);
     if (response.statusCode != 200) {
@@ -119,7 +163,7 @@ class GameService extends ChangeNotifier {
     rejoinedActiveTableId = data['activeTableId']?.toString();
 
     final prefs = await SharedPreferences.getInstance();
-    await prefs.remove('saved_password'); // Düz metin şifre saklamayı temizle
+    await prefs.remove('saved_password');
     if (rememberMe && _token != null) {
       await prefs.setString('saved_username', username.trim());
       await prefs.setString('jwt_token', _token!);

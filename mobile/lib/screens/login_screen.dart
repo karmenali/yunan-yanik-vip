@@ -107,53 +107,48 @@ class _LoginScreenState extends State<LoginScreen> {
                 child: Column(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    // ÜST KULÜP AMBLEMİ & LOGO
+                    // ÜST OYUN LOGOSU (PROFESYONEL 3D KRALİYET ARMASI)
                     Container(
-                      width: 96,
-                      height: 96,
+                      width: 146,
+                      height: 146,
                       decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        gradient: const RadialGradient(
-                          colors: [Color(0xFFFDE047), Color(0xFFB45309)],
+                        borderRadius: BorderRadius.circular(32),
+                        border: Border.all(
+                          color: const Color(0xFFD4AF37),
+                          width: 2.2,
                         ),
-                        border: Border.all(color: Colors.white, width: 2.5),
                         boxShadow: [
                           BoxShadow(
                             color: const Color(0xFFD4AF37).withValues(alpha: 0.45),
-                            blurRadius: 28,
-                            spreadRadius: 4,
+                            blurRadius: 30,
+                            spreadRadius: 3,
+                          ),
+                          const BoxShadow(
+                            color: Colors.black87,
+                            blurRadius: 18,
+                            offset: Offset(0, 8),
                           ),
                         ],
                       ),
-                      child: const Center(
-                        child: Text(
-                          '🃏',
-                          style: TextStyle(fontSize: 48),
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(30),
+                        child: Image.asset(
+                          'assets/images/game_logo.jpg',
+                          fit: BoxFit.cover,
                         ),
                       ),
                     ),
-                    const SizedBox(height: 18),
+                    const SizedBox(height: 16),
                     const Text(
                       'YUNAN YANIK VIP',
                       style: TextStyle(
                         color: Color(0xFFFDE047),
-                        fontSize: 28,
+                        fontSize: 27,
                         fontWeight: FontWeight.w900,
                         letterSpacing: 2.0,
                       ),
                     ),
-                    const SizedBox(height: 4),
-                    const Text(
-                      'GERÇEK ZAMANLI ÇOK OYUNCULU KULÜP',
-                      textAlign: TextAlign.center,
-                      style: TextStyle(
-                        color: Colors.white70,
-                        fontSize: 12.5,
-                        fontWeight: FontWeight.w600,
-                        letterSpacing: 1.1,
-                      ),
-                    ),
-                    const SizedBox(height: 32),
+                    const SizedBox(height: 24),
 
                     // GİRİŞ FORMU KARTI
                     Container(
@@ -349,19 +344,6 @@ class _LoginScreenState extends State<LoginScreen> {
                           ),
                         ],
                       ),
-                    ),
-
-                    const SizedBox(height: 28),
-                    const Row(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Icon(Icons.verified_user, color: Color(0xFFD4AF37), size: 15),
-                        SizedBox(width: 6),
-                        Text(
-                          'Güvenli Kulüp Bağlantısı  •  v1.0',
-                          style: TextStyle(color: Colors.white54, fontSize: 12),
-                        ),
-                      ],
                     ),
                   ],
                 ),
