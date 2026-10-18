@@ -140,6 +140,7 @@ class SeatPlayerModel {
   final bool isConnected;
   final int totalScore;
   final bool isEliminated;
+  final bool forfeitedRebuy;
   final int rebuyCount;
   final bool awaitingRebuyDecision;
   final int cardCount;
@@ -153,6 +154,7 @@ class SeatPlayerModel {
     required this.isConnected,
     required this.totalScore,
     required this.isEliminated,
+    this.forfeitedRebuy = false,
     required this.rebuyCount,
     required this.awaitingRebuyDecision,
     required this.cardCount,
@@ -168,6 +170,7 @@ class SeatPlayerModel {
       isConnected: json['isConnected'] != false,
       totalScore: int.tryParse(json['totalScore']?.toString() ?? '0') ?? 0,
       isEliminated: json['isEliminated'] == true,
+      forfeitedRebuy: json['forfeitedRebuy'] == true,
       rebuyCount: int.tryParse(json['rebuyCount']?.toString() ?? '0') ?? 0,
       awaitingRebuyDecision: json['awaitingRebuyDecision'] == true,
       cardCount: int.tryParse(json['cardCount']?.toString() ?? '0') ?? 0,
@@ -179,6 +182,13 @@ class ShowdownPlayerResultModel {
   final String userId;
   final String username;
   final String avatar;
+  final int seatIndex;
+  final bool isFinisher;
+  final bool isFalseDeclarer;
+  final bool forfeitedRebuy;
+  final int revealOrder;
+  final int revealStartMs;
+  final int revealDurationMs;
   final List<List<CardModel>> melds;
   final List<CardModel> unmelded;
   final int roundPenalty;
@@ -194,6 +204,13 @@ class ShowdownPlayerResultModel {
     required this.userId,
     required this.username,
     required this.avatar,
+    this.seatIndex = 0,
+    this.isFinisher = false,
+    this.isFalseDeclarer = false,
+    this.forfeitedRebuy = false,
+    this.revealOrder = 0,
+    this.revealStartMs = 0,
+    this.revealDurationMs = 3500,
     required this.melds,
     required this.unmelded,
     required this.roundPenalty,
@@ -222,6 +239,14 @@ class ShowdownPlayerResultModel {
       userId: json['userId']?.toString() ?? '',
       username: json['username']?.toString() ?? '',
       avatar: json['avatar']?.toString() ?? 'lion',
+      seatIndex: int.tryParse(json['seatIndex']?.toString() ?? '0') ?? 0,
+      isFinisher: json['isFinisher'] == true,
+      isFalseDeclarer: json['isFalseDeclarer'] == true,
+      forfeitedRebuy: json['forfeitedRebuy'] == true,
+      revealOrder: int.tryParse(json['revealOrder']?.toString() ?? '0') ?? 0,
+      revealStartMs: int.tryParse(json['revealStartMs']?.toString() ?? '0') ?? 0,
+      revealDurationMs:
+          int.tryParse(json['revealDurationMs']?.toString() ?? '3500') ?? 3500,
       melds: parsedMelds,
       unmelded: parsedUnmelded,
       roundPenalty: int.tryParse(json['roundPenalty']?.toString() ?? '0') ?? 0,
@@ -243,25 +268,33 @@ class TableStateModel {
   final int minPlayers;
   final int maxPlayers;
   final int entryFee;
+  final bool isAssisted;
   final String status; // 'waiting', 'playing', 'round_summary', 'finished'
   final int pot;
   final int roundNumber;
   final int drawPileCount;
   final CardModel? topDiscardCard;
+  final List<CardModel> discardHistory;
   final CardModel? indicatorCard;
   final int wildRank;
   final int currentTurnSeat;
   final int dealerSeat;
   final bool hasDrawnThisTurn;
   int turnRemainingSeconds;
+  int turnDurationSeconds;
   int matchElapsedSeconds;
   final List<SeatPlayerModel?> seats;
   final List<CardModel> myHand;
+  final List<List<String>> myHandRows;
   final bool canFinishNow;
   final String? winningDiscardCardId;
   final int currentHandPenalty;
   final Set<String> meldedCardIds;
   final List<ShowdownPlayerResultModel> lastShowdown;
+  final String? lastFinisherUserId;
+  final String? lastFalseDeclarerUserId;
+  int showdownElapsedMs;
+  final int showdownTotalMs;
   final List<Map<String, dynamic>> scoreHistory;
   final Map<String, dynamic>? lastWinnerInfo;
 
@@ -272,25 +305,33 @@ class TableStateModel {
     required this.minPlayers,
     required this.maxPlayers,
     required this.entryFee,
+    this.isAssisted = true,
     required this.status,
     required this.pot,
     required this.roundNumber,
     required this.drawPileCount,
     this.topDiscardCard,
+    this.discardHistory = const [],
     this.indicatorCard,
     required this.wildRank,
     required this.currentTurnSeat,
     required this.dealerSeat,
     required this.hasDrawnThisTurn,
     required this.turnRemainingSeconds,
+    this.turnDurationSeconds = 30,
     this.matchElapsedSeconds = 0,
     required this.seats,
     required this.myHand,
+    this.myHandRows = const [[], [], []],
     required this.canFinishNow,
     this.winningDiscardCardId,
     required this.currentHandPenalty,
     required this.meldedCardIds,
     required this.lastShowdown,
+    this.lastFinisherUserId,
+    this.lastFalseDeclarerUserId,
+    this.showdownElapsedMs = 0,
+    this.showdownTotalMs = 15000,
     required this.scoreHistory,
     this.lastWinnerInfo,
   });
@@ -304,6 +345,18 @@ class TableStateModel {
 
     final rawHand = (json['myHand'] as List?) ?? [];
     final myHand = rawHand
+        .map((c) => CardModel.fromJson(Map<String, dynamic>.from(c)))
+        .toList();
+
+    final rawRows = (json['myHandRows'] as List?) ?? [];
+    final myHandRows = <List<String>>[[], [], []];
+    for (int i = 0; i < 3 && i < rawRows.length; i++) {
+      final r = (rawRows[i] as List?) ?? [];
+      myHandRows[i] = r.map((e) => e.toString()).toList();
+    }
+
+    final rawDiscardHistory = (json['discardHistory'] as List?) ?? [];
+    final discardHistory = rawDiscardHistory
         .map((c) => CardModel.fromJson(Map<String, dynamic>.from(c)))
         .toList();
 
@@ -324,6 +377,7 @@ class TableStateModel {
       minPlayers: int.tryParse(json['minPlayers']?.toString() ?? '2') ?? 2,
       maxPlayers: int.tryParse(json['maxPlayers']?.toString() ?? '4') ?? 4,
       entryFee: int.tryParse(json['entryFee']?.toString() ?? '100') ?? 100,
+      isAssisted: json['isAssisted'] != false,
       status: json['status']?.toString() ?? 'waiting',
       pot: int.tryParse(json['pot']?.toString() ?? '0') ?? 0,
       roundNumber: int.tryParse(json['roundNumber']?.toString() ?? '0') ?? 0,
@@ -331,6 +385,7 @@ class TableStateModel {
       topDiscardCard: json['topDiscardCard'] != null
           ? CardModel.fromJson(Map<String, dynamic>.from(json['topDiscardCard']))
           : null,
+      discardHistory: discardHistory,
       indicatorCard: json['indicatorCard'] != null
           ? CardModel.fromJson(Map<String, dynamic>.from(json['indicatorCard']))
           : null,
@@ -340,15 +395,24 @@ class TableStateModel {
       hasDrawnThisTurn: json['hasDrawnThisTurn'] == true,
       turnRemainingSeconds:
           int.tryParse(json['turnRemainingSeconds']?.toString() ?? '30') ?? 30,
+      turnDurationSeconds:
+          int.tryParse(json['turnDurationSeconds']?.toString() ?? '30') ?? 30,
       matchElapsedSeconds:
           int.tryParse(json['matchElapsedSeconds']?.toString() ?? '0') ?? 0,
       seats: seats,
       myHand: myHand,
+      myHandRows: myHandRows,
       canFinishNow: evalMap?['canFinish'] == true,
       winningDiscardCardId: evalMap?['winningDiscardCardId']?.toString(),
       currentHandPenalty: int.tryParse(evalMap?['penalty']?.toString() ?? '0') ?? 0,
       meldedCardIds: meldedList.map((e) => e.toString()).toSet(),
       lastShowdown: showdown,
+      lastFinisherUserId: json['lastFinisherUserId']?.toString(),
+      lastFalseDeclarerUserId: json['lastFalseDeclarerUserId']?.toString(),
+      showdownElapsedMs:
+          int.tryParse(json['showdownElapsedMs']?.toString() ?? '0') ?? 0,
+      showdownTotalMs:
+          int.tryParse(json['showdownTotalMs']?.toString() ?? '15000') ?? 15000,
       scoreHistory: rawHistory.map((e) => Map<String, dynamic>.from(e)).toList(),
       lastWinnerInfo: json['lastWinnerInfo'] != null
           ? Map<String, dynamic>.from(json['lastWinnerInfo'])
@@ -364,6 +428,7 @@ class LobbyTableModel {
   final int minPlayers;
   final int maxPlayers;
   final int entryFee;
+  final bool isAssisted;
   final String status;
   final int pot;
   final int roundNumber;
@@ -377,6 +442,7 @@ class LobbyTableModel {
     required this.minPlayers,
     required this.maxPlayers,
     required this.entryFee,
+    this.isAssisted = true,
     required this.status,
     required this.pot,
     required this.roundNumber,
@@ -393,6 +459,7 @@ class LobbyTableModel {
       minPlayers: int.tryParse(json['minPlayers']?.toString() ?? '2') ?? 2,
       maxPlayers: int.tryParse(json['maxPlayers']?.toString() ?? '4') ?? 4,
       entryFee: int.tryParse(json['entryFee']?.toString() ?? '100') ?? 100,
+      isAssisted: json['isAssisted'] != false,
       status: json['status']?.toString() ?? 'waiting',
       pot: int.tryParse(json['pot']?.toString() ?? '0') ?? 0,
       roundNumber: int.tryParse(json['roundNumber']?.toString() ?? '0') ?? 0,

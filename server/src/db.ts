@@ -37,6 +37,10 @@ class DatabaseService {
   // In-memory yedek (yerel hızlı testler için, Docker'da doğrudan PostgreSQL kullanılır)
   private memUsers: Map<string, UserRecord> = new Map();
   private memTransactions: CreditTransaction[] = [];
+  private memActiveMatches: Map<
+    string,
+    { tableName: string; pot: number; contributions: Record<string, number> }
+  > = new Map();
   private memVault: VaultSummary = {
     rake_collected: 0,
     emoji_collected: 0,
@@ -52,6 +56,7 @@ class DatabaseService {
         await this.pool.query('SELECT 1');
         console.log('✅ PostgreSQL veritabanına başarıyla bağlanıldı.');
         await this.createSchema();
+        await this.refundUnfinishedMatchesOnStartup();
         await this.seedDefaultUsers();
         return;
       } catch (err) {
@@ -99,10 +104,39 @@ class DatabaseService {
         emoji_cost INT NOT NULL DEFAULT 10
       );
 
+      CREATE TABLE IF NOT EXISTS active_matches (
+        table_id VARCHAR(64) PRIMARY KEY,
+        table_name VARCHAR(128) NOT NULL,
+        pot BIGINT NOT NULL DEFAULT 0,
+        contributions JSONB NOT NULL DEFAULT '{}'::jsonb,
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+      );
+
       INSERT INTO system_vault (id, rake_collected, emoji_collected, total_games_played, emoji_cost)
       VALUES (1, 0, 0, 0, 10)
       ON CONFLICT (id) DO NOTHING;
     `);
+  }
+
+  /**
+   * Sunucu yeniden başladığında yarım kalmış aktif maçların potlarını oyunculara otomatik iade eder
+   */
+  async refundUnfinishedMatchesOnStartup(): Promise<void> {
+    if (this.useMemory || !this.pool) return;
+    try {
+      const res = await this.pool.query('SELECT * FROM active_matches');
+      for (const row of res.rows) {
+        const tableId = String(row.table_id);
+        const tableName = String(row.table_name || 'Masa');
+        await this.refundMatchEscrow(
+          tableId,
+          `${tableName} sunucu bakımı / yarım kalan maç otomatik kredi iadesi`
+        );
+        console.log(`♻️ Yarım kalan maç iade edildi: ${tableName} (${tableId})`);
+      }
+    } catch (err) {
+      console.error('Başlangıç escrow iade kontrolü hatası:', err);
+    }
   }
 
   private async seedDefaultUsers(): Promise<void> {
@@ -421,6 +455,165 @@ class DatabaseService {
       description: r.description,
       created_at: new Date(r.created_at).toISOString(),
     }));
+  }
+
+  async upsertMatchEscrow(
+    tableId: string,
+    tableName: string,
+    pot: number,
+    contributions: Record<string, number>
+  ): Promise<void> {
+    if (this.useMemory || !this.pool) {
+      this.memActiveMatches.set(tableId, {
+        tableName,
+        pot: Math.round(pot),
+        contributions: { ...contributions },
+      });
+      return;
+    }
+    await this.pool.query(
+      `INSERT INTO active_matches (table_id, table_name, pot, contributions, updated_at)
+       VALUES ($1, $2, $3, $4::jsonb, NOW())
+       ON CONFLICT (table_id)
+       DO UPDATE SET table_name = EXCLUDED.table_name,
+                     pot = EXCLUDED.pot,
+                     contributions = EXCLUDED.contributions,
+                     updated_at = NOW()`,
+      [tableId, tableName, Math.round(pot), JSON.stringify(contributions)]
+    );
+  }
+
+  async clearMatchEscrow(tableId: string): Promise<void> {
+    if (this.useMemory || !this.pool) {
+      this.memActiveMatches.delete(tableId);
+      return;
+    }
+    await this.pool.query('DELETE FROM active_matches WHERE table_id = $1', [tableId]);
+  }
+
+  async refundMatchEscrow(
+    tableId: string,
+    reason: string
+  ): Promise<Array<{ userId: string; amount: number; newCredits: number }>> {
+    const refunded: Array<{ userId: string; amount: number; newCredits: number }> = [];
+
+    if (this.useMemory || !this.pool) {
+      const escrow = this.memActiveMatches.get(tableId);
+      if (!escrow) return refunded;
+      this.memActiveMatches.delete(tableId);
+      for (const [uid, amt] of Object.entries(escrow.contributions)) {
+        const cleanAmt = Math.round(Number(amt));
+        if (cleanAmt > 0) {
+          try {
+            const newCredits = await this.adjustCredits(uid, cleanAmt, 'table_refund', reason);
+            refunded.push({ userId: uid, amount: cleanAmt, newCredits });
+          } catch {}
+        }
+      }
+      return refunded;
+    }
+
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const res = await client.query(
+        'SELECT * FROM active_matches WHERE table_id = $1 FOR UPDATE',
+        [tableId]
+      );
+      if (res.rows.length === 0) {
+        await client.query('COMMIT');
+        return refunded;
+      }
+
+      const contributions: Record<string, number> = res.rows[0].contributions || {};
+      await client.query('DELETE FROM active_matches WHERE table_id = $1', [tableId]);
+
+      for (const [uid, amt] of Object.entries(contributions)) {
+        const cleanAmt = Math.round(Number(amt));
+        if (cleanAmt <= 0) continue;
+        const uRes = await client.query(
+          'SELECT id, username, credits FROM users WHERE id = $1 FOR UPDATE',
+          [uid]
+        );
+        if (uRes.rows.length === 0) continue;
+        const username = uRes.rows[0].username;
+        const newCredits = Number(uRes.rows[0].credits) + cleanAmt;
+        await client.query('UPDATE users SET credits = $1 WHERE id = $2', [newCredits, uid]);
+        await client.query(
+          `INSERT INTO credit_transactions (id, user_id, username, amount, type, description)
+           VALUES ($1, $2, $3, $4, $5, $6)`,
+          [uuidv4(), uid, username, cleanAmt, 'table_refund', reason]
+        );
+        refunded.push({ userId: uid, amount: cleanAmt, newCredits });
+      }
+
+      await client.query('COMMIT');
+      return refunded;
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Oyun sonu ödül dağıtımını, kasa komisyonunu ve aktif maç escrow kaydının silinmesini tek bir atomik DB işleminde yapar
+   */
+  async settleMatchVictory(
+    tableId: string,
+    winnerUserId: string,
+    prizeWon: number,
+    houseRake: number,
+    description: string
+  ): Promise<number> {
+    const cleanPrize = Math.round(prizeWon);
+    const cleanRake = Math.round(houseRake);
+
+    if (this.useMemory || !this.pool) {
+      this.memActiveMatches.delete(tableId);
+      const newBal = await this.adjustCredits(winnerUserId, cleanPrize, 'table_win', description);
+      await this.addVaultRake(cleanRake);
+      return newBal;
+    }
+
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('DELETE FROM active_matches WHERE table_id = $1', [tableId]);
+
+      const uRes = await client.query(
+        'SELECT id, username, credits FROM users WHERE id = $1 FOR UPDATE',
+        [winnerUserId]
+      );
+      if (uRes.rows.length === 0) {
+        throw new Error('Kazanan kullanıcı bulunamadı.');
+      }
+      const username = uRes.rows[0].username;
+      const newCredits = Number(uRes.rows[0].credits) + cleanPrize;
+
+      await client.query('UPDATE users SET credits = $1 WHERE id = $2', [newCredits, winnerUserId]);
+      await client.query(
+        `INSERT INTO credit_transactions (id, user_id, username, amount, type, description)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [uuidv4(), winnerUserId, username, cleanPrize, 'table_win', description]
+      );
+      await client.query(
+        `UPDATE system_vault
+         SET rake_collected = rake_collected + $1,
+             total_games_played = total_games_played + 1
+         WHERE id = 1`,
+        [cleanRake]
+      );
+
+      await client.query('COMMIT');
+      return newCredits;
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
   }
 
   private mapUserRow(row: any): UserRecord {

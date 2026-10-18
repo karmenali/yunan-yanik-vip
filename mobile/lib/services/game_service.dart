@@ -15,6 +15,7 @@ class GameService extends ChangeNotifier {
   String? _token;
   UserModel? currentUser;
   int emojiCost = 10;
+  String? rejoinedActiveTableId;
 
   io.Socket? _socket;
   bool isSocketConnected = false;
@@ -25,8 +26,12 @@ class GameService extends ChangeNotifier {
   List<Map<String, dynamic>> tableChatMessages = [];
   String? activeVoiceSpeakerUsername;
 
-  // Görsel uçan efekt & bildirim akışları
+  // Görsel uçan efekt, kart animasyonu & bildirim akışları
   final StreamController<Map<String, dynamic>> effectStreamController =
+      StreamController<Map<String, dynamic>>.broadcast();
+  final StreamController<Map<String, dynamic>> cardAnimStreamController =
+      StreamController<Map<String, dynamic>>.broadcast();
+  final StreamController<Map<String, dynamic>> chatStreamController =
       StreamController<Map<String, dynamic>>.broadcast();
   final StreamController<String> toastStreamController =
       StreamController<String>.broadcast();
@@ -44,6 +49,36 @@ class GameService extends ChangeNotifier {
     notifyListeners();
   }
 
+  Future<bool> tryAutoLogin() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final savedToken = prefs.getString('jwt_token');
+      if (savedToken == null || savedToken.isEmpty) return false;
+
+      final uri = Uri.parse('$_serverUrl/api/auth/me');
+      final response = await http
+          .get(uri, headers: {'Authorization': 'Bearer $savedToken'})
+          .timeout(const Duration(seconds: 6));
+
+      if (response.statusCode != 200) {
+        await prefs.remove('jwt_token');
+        return false;
+      }
+
+      final data = jsonDecode(response.body);
+      _token = savedToken;
+      currentUser = UserModel.fromJson(Map<String, dynamic>.from(data['user']));
+      emojiCost = int.tryParse(data['emojiCost']?.toString() ?? '10') ?? 10;
+      rejoinedActiveTableId = data['activeTableId']?.toString();
+
+      _connectSocket();
+      notifyListeners();
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
   Future<void> setServerUrl(String url) async {
     String clean = url.trim();
     if (clean.endsWith('/')) {
@@ -58,7 +93,7 @@ class GameService extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> login(String username, String password) async {
+  Future<void> login(String username, String password, {bool rememberMe = true}) async {
     final uri = Uri.parse('$_serverUrl/api/auth/login');
     final response = await http
         .post(
@@ -76,18 +111,32 @@ class GameService extends ChangeNotifier {
     _token = data['token'];
     currentUser = UserModel.fromJson(Map<String, dynamic>.from(data['user']));
     emojiCost = int.tryParse(data['emojiCost']?.toString() ?? '10') ?? 10;
+    rejoinedActiveTableId = data['activeTableId']?.toString();
+
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('saved_password'); // Düz metin şifre saklamayı temizle
+    if (rememberMe && _token != null) {
+      await prefs.setString('saved_username', username.trim());
+      await prefs.setString('jwt_token', _token!);
+    } else {
+      await prefs.remove('saved_username');
+      await prefs.remove('jwt_token');
+    }
 
     _connectSocket();
     notifyListeners();
   }
 
-  void logout() {
+  Future<void> logout() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('jwt_token');
     _socket?.disconnect();
     _socket?.dispose();
     _socket = null;
     _token = null;
     currentUser = null;
     activeTable = null;
+    rejoinedActiveTableId = null;
     lastDrawnCardId = null;
     lobbyTables = [];
     isSocketConnected = false;
@@ -122,11 +171,29 @@ class GameService extends ChangeNotifier {
       notifyListeners();
     });
 
+    _socket!.on('active_table_rejoined', (data) {
+      if (data is Map && data['tableId'] != null) {
+        rejoinedActiveTableId = data['tableId'].toString();
+        notifyListeners();
+      }
+    });
+
     _socket!.on('lobby_tables', (data) {
       if (data is List) {
         lobbyTables = data
             .map((e) => LobbyTableModel.fromJson(Map<String, dynamic>.from(e)))
             .toList();
+        // Kullanıcının oturduğu aktif masa varsa tespit et
+        if (currentUser != null) {
+          String? foundId;
+          for (final t in lobbyTables) {
+            if (t.players.any((p) => p['userId']?.toString() == currentUser!.id)) {
+              foundId = t.id;
+              break;
+            }
+          }
+          rejoinedActiveTableId = foundId;
+        }
         notifyListeners();
       }
     });
@@ -151,6 +218,56 @@ class GameService extends ChangeNotifier {
 
         activeTable = nextTable;
         notifyListeners();
+      }
+    });
+
+    _socket!.on('round_started', (data) {
+      if (data is Map) {
+        SoundFx.playCardDraw();
+        cardAnimStreamController.add({
+          'type': 'round_started',
+          ...Map<String, dynamic>.from(data),
+        });
+      }
+    });
+
+    _socket!.on('player_drew_card', (data) {
+      if (data is Map) {
+        cardAnimStreamController.add({
+          'type': 'draw',
+          ...Map<String, dynamic>.from(data),
+        });
+      }
+    });
+
+    _socket!.on('card_discarded', (data) {
+      if (data is Map) {
+        SoundFx.playCardDiscard();
+        cardAnimStreamController.add({
+          'type': 'discard',
+          ...Map<String, dynamic>.from(data),
+        });
+      }
+    });
+
+    _socket!.on('false_declare_penalty', (data) {
+      if (data is Map) {
+        final msg = data['message']?.toString() ?? 'Hatalı el açıldı!';
+        toastStreamController.add('🚨 $msg');
+        cardAnimStreamController.add({
+          'type': 'false_declare',
+          ...Map<String, dynamic>.from(data),
+        });
+      }
+    });
+
+    _socket!.on('round_ended', (data) {
+      if (data is Map) {
+        SoundFx.playCelebration();
+        cardAnimStreamController.add({
+          'type': 'round_ended',
+          ...Map<String, dynamic>.from(data),
+        });
       }
     });
 
@@ -187,10 +304,12 @@ class GameService extends ChangeNotifier {
 
     _socket!.on('chat_message', (data) {
       if (data is Map) {
-        tableChatMessages.add(Map<String, dynamic>.from(data));
+        final msg = Map<String, dynamic>.from(data);
+        tableChatMessages.add(msg);
         if (tableChatMessages.length > 50) {
           tableChatMessages.removeAt(0);
         }
+        chatStreamController.add(msg);
         notifyListeners();
       }
     });
@@ -201,6 +320,9 @@ class GameService extends ChangeNotifier {
           activeTable!.turnRemainingSeconds =
               int.tryParse(data['turnRemainingSeconds']?.toString() ?? '0') ??
                   activeTable!.turnRemainingSeconds;
+          activeTable!.turnDurationSeconds =
+              int.tryParse(data['turnDurationSeconds']?.toString() ?? '30') ??
+                  activeTable!.turnDurationSeconds;
           activeTable!.matchElapsedSeconds =
               int.tryParse(data['matchElapsedSeconds']?.toString() ?? '0') ??
                   activeTable!.matchElapsedSeconds;
@@ -225,7 +347,6 @@ class GameService extends ChangeNotifier {
                   .length ??
               0;
 
-          // Başka bir oyuncudan geldiyse VEYA kullanıcı masada tek başına mikrofon testi yapıyorsa hoparlörden çal!
           if (!isMe || seatedOthers == 0) {
             activeVoiceSpeakerUsername = speakerName;
             if (isMe && seatedOthers == 0) {
@@ -271,7 +392,10 @@ class GameService extends ChangeNotifier {
 
     _socket!.on('table_closed', (data) {
       activeTable = null;
-      toastStreamController.add('Masa kapatıldı.');
+      final msg = (data is Map && data['message'] != null)
+          ? data['message'].toString()
+          : 'Masa kapatıldı.';
+      toastStreamController.add(msg);
       notifyListeners();
     });
 
@@ -319,6 +443,7 @@ class GameService extends ChangeNotifier {
     required String name,
     required int maxPlayers,
     required int entryFee,
+    bool isAssisted = true,
   }) {
     final completer = Completer<String>();
     _socket?.emitWithAck(
@@ -327,6 +452,7 @@ class GameService extends ChangeNotifier {
         'name': name,
         'maxPlayers': maxPlayers,
         'entryFee': entryFee,
+        'isAssisted': isAssisted,
       },
       ack: (res) {
         if (res is Map && res['ok'] == true) {
@@ -387,20 +513,25 @@ class GameService extends ChangeNotifier {
     });
   }
 
-  void declareFinish({String? discardCardId}) {
+  void declareFinish({String? discardCardId, List<List<String>>? rowCardIds}) {
     if (activeTable == null) return;
     SoundFx.playCelebration();
     _socket?.emit('declare_finish', {
       'tableId': activeTable!.id,
       'discardCardId': discardCardId,
+      'rowCardIds': rowCardIds,
     });
   }
 
-  void reorderHand({List<String>? orderedCardIds}) {
+  void reorderHand({
+    List<String>? orderedCardIds,
+    List<List<String>>? rowCardIds,
+  }) {
     if (activeTable == null) return;
     _socket?.emit('reorder_hand', {
       'tableId': activeTable!.id,
       'orderedCardIds': orderedCardIds,
+      'rowCardIds': rowCardIds,
     });
   }
 
@@ -426,7 +557,6 @@ class GameService extends ChangeNotifier {
     });
   }
 
-  /// Bas-Konuş başlat: Mikrofondan gerçek ses kaydına başlar
   Future<bool> startVoicePushToTalk() async {
     if (activeTable == null) return false;
     final started = await SoundFx.startPttRecording();
@@ -441,7 +571,6 @@ class GameService extends ChangeNotifier {
     return started;
   }
 
-  /// Bas-Konuş bırak: Kaydedilen sesi masadaki tüm oyunculara gönderir ve hoparlörden çaldırır
   Future<void> stopVoicePushToTalk() async {
     if (activeTable == null) return;
     final audioB64 = await SoundFx.stopPttRecordingAndGetBase64();

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../models/game_models.dart';
@@ -16,16 +17,22 @@ class TableScreen extends StatefulWidget {
 }
 
 class _TableScreenState extends State<TableScreen> {
-  // 60 FPS Sıfır Gecikmeli Yerel Kart Listesi ve Sürükleme Durumu
-  List<CardModel> _localHand = [];
+  // 3 Sıralı Dikey Istaka Durumu (_localRows[0], _localRows[1], _localRows[2])
+  List<List<CardModel>> _localRows = [[], [], []];
   String? _selectedCardId;
   String? _draggingCardId;
-  double _dragFingerX = 0;
+  Offset _dragLocalPos = Offset.zero;
+  bool _dragReadyToDiscardUp = false;
 
   bool _showScoreboardModal = false;
   bool _showChatDrawer = false;
   bool _dismissedWinnerModal = false;
   String? _lastSeenWinnerId;
+
+  // El Sonu Şeffaf Animasyonlu Gösterim (İlk 10 sn Açan El + Saat Yönünde Sırayla Ceza Açılışı)
+  Timer? _showdownTicker;
+  int _showdownElapsedMs = 0;
+  int _lastAnimatedShowdownRound = -1;
 
   // Sesli Sohbet (Hem Basılı Tut-Konuş hem Dokun-Konuş desteği)
   bool _isVoiceRecording = false;
@@ -41,9 +48,13 @@ class _TableScreenState extends State<TableScreen> {
   String? _toastBanner;
   Timer? _toastTimer;
   final List<Map<String, dynamic>> _floatingEffects = [];
+  final Map<String, String> _seatSpeechBubbles = {}; // userId -> son mesaj
+  Map<String, dynamic>? _activeFlyingCardAnim;
 
   StreamSubscription<String>? _toastSub;
   StreamSubscription<Map<String, dynamic>>? _effectSub;
+  StreamSubscription<Map<String, dynamic>>? _cardAnimSub;
+  StreamSubscription<Map<String, dynamic>>? _chatSub;
   final _chatCtrl = TextEditingController();
 
   @override
@@ -57,9 +68,8 @@ class _TableScreenState extends State<TableScreen> {
 
     final gs = GameService.instance;
     gs.addListener(_onGameUpdate);
-    _syncLocalHandFromServer();
+    _syncLocalRowsFromServer();
 
-    // Yerel 1 saniyelik sayaç: Sunucu paketi gecikse bile ekran sayacının asla donmamasını garanti eder
     _localSecondTicker = Timer.periodic(const Duration(seconds: 1), (_) {
       if (!mounted) return;
       final table = gs.activeTable;
@@ -82,11 +92,40 @@ class _TableScreenState extends State<TableScreen> {
       if (!mounted) return;
       SoundFx.playCardTap();
       setState(() => _floatingEffects.add(eff));
-      Future.delayed(const Duration(milliseconds: 2400), () {
+      Future.delayed(const Duration(milliseconds: 2200), () {
         if (mounted) {
           setState(() => _floatingEffects.remove(eff));
         }
       });
+    });
+
+    _cardAnimSub = gs.cardAnimStreamController.stream.listen((anim) {
+      if (!mounted) return;
+      final type = anim['type']?.toString();
+      if (type == 'draw' || type == 'discard') {
+        setState(() => _activeFlyingCardAnim = anim);
+        Future.delayed(const Duration(milliseconds: 420), () {
+          if (mounted && _activeFlyingCardAnim == anim) {
+            setState(() => _activeFlyingCardAnim = null);
+          }
+        });
+      } else if (type == 'round_ended') {
+        _startShowdownAnimationTimer(reset: true);
+      }
+    });
+
+    _chatSub = gs.chatStreamController.stream.listen((msg) {
+      if (!mounted) return;
+      final uid = msg['userId']?.toString() ?? '';
+      final text = msg['message']?.toString() ?? '';
+      if (uid.isNotEmpty && text.isNotEmpty) {
+        setState(() => _seatSpeechBubbles[uid] = text);
+        Future.delayed(const Duration(seconds: 4), () {
+          if (mounted && _seatSpeechBubbles[uid] == text) {
+            setState(() => _seatSpeechBubbles.remove(uid));
+          }
+        });
+      }
     });
   }
 
@@ -94,39 +133,130 @@ class _TableScreenState extends State<TableScreen> {
   void dispose() {
     GameService.instance.removeListener(_onGameUpdate);
     _localSecondTicker?.cancel();
+    _showdownTicker?.cancel();
     _pttAutoStopTimer?.cancel();
     _recordingTickTimer?.cancel();
     _toastSub?.cancel();
     _effectSub?.cancel();
+    _cardAnimSub?.cancel();
+    _chatSub?.cancel();
     _toastTimer?.cancel();
     _chatCtrl.dispose();
     super.dispose();
   }
 
-  void _syncLocalHandFromServer() {
+  void _startShowdownAnimationTimer({bool reset = false}) {
+    final table = GameService.instance.activeTable;
+    if (table == null || table.status != 'round_summary') {
+      _showdownTicker?.cancel();
+      _showdownTicker = null;
+      return;
+    }
+
+    if (reset || _lastAnimatedShowdownRound != table.roundNumber) {
+      _lastAnimatedShowdownRound = table.roundNumber;
+      _showdownElapsedMs = table.showdownElapsedMs;
+    }
+
+    _showdownTicker?.cancel();
+    _showdownTicker = Timer.periodic(const Duration(milliseconds: 100), (timer) {
+      if (!mounted) {
+        timer.cancel();
+        return;
+      }
+      final t = GameService.instance.activeTable;
+      if (t == null || t.status != 'round_summary') {
+        timer.cancel();
+        return;
+      }
+      setState(() {
+        _showdownElapsedMs += 100;
+      });
+    });
+  }
+
+  List<CardModel> get _allLocalCards =>
+      [..._localRows[0], ..._localRows[1], ..._localRows[2]];
+
+  List<List<String>> get _currentRowIds =>
+      _localRows.map((r) => r.map((c) => c.id).toList()).toList();
+
+  void _syncLocalRowsFromServer() {
     final table = GameService.instance.activeTable;
     if (table == null) {
-      _localHand = [];
+      _localRows = [[], [], []];
       return;
     }
-    // Kullanıcı şu an parmağıyla kart sürüklüyorsa ve kart sayısı değişmediyse
-    // parmağın altındaki sırayı bozma!
+
+    final serverCards = table.myHand;
+    if (serverCards.isEmpty) {
+      _localRows = [[], [], []];
+      return;
+    }
+
+    final currentIds = _allLocalCards.map((c) => c.id).toSet();
+    final serverIds = serverCards.map((c) => c.id).toSet();
+
+    // Kullanıcı şu anda parmağıyla kart sürüklüyorsa ve eldeki kart kümesi değişmediyse sırayı bozma
     if (_draggingCardId != null &&
-        _localHand.length == table.myHand.length &&
-        _localHand.map((c) => c.id).toSet().containsAll(
-              table.myHand.map((c) => c.id),
-            )) {
+        currentIds.length == serverIds.length &&
+        currentIds.containsAll(serverIds)) {
       return;
     }
-    _localHand = List<CardModel>.from(table.myHand);
+
+    final cardMap = {for (final c in serverCards) c.id: c};
+    final seen = <String>{};
+    final nextRows = <List<CardModel>>[[], [], []];
+
+    // Önce sunucudan gelen (veya yerel korunan) 3 sıra dizilimini uygula
+    final sourceRowIds = table.myHandRows.any((r) => r.isNotEmpty)
+        ? table.myHandRows
+        : _currentRowIds;
+
+    for (int r = 0; r < 3; r++) {
+      final ids = r < sourceRowIds.length ? sourceRowIds[r] : <String>[];
+      for (final id in ids) {
+        final c = cardMap[id];
+        if (c != null && !seen.contains(id)) {
+          nextRows[r].add(c);
+          seen.add(id);
+        }
+      }
+    }
+
+    // Henüz bir sıraya yerleşmemiş kağıtları (ör. yeni çekilen 11. kağıt) en uygun sıraya yerleştir
+    for (final c in serverCards) {
+      if (!seen.contains(c.id)) {
+        int targetRow = 2;
+        if (nextRows[0].length < 4) {
+          targetRow = 0;
+        } else if (nextRows[1].length < 3) {
+          targetRow = 1;
+        } else {
+          targetRow = 2;
+        }
+        nextRows[targetRow].add(c);
+        seen.add(c.id);
+      }
+    }
+
+    _localRows = nextRows;
   }
 
   void _onGameUpdate() {
     if (!mounted) return;
     final table = GameService.instance.activeTable;
-    _syncLocalHandFromServer();
+    _syncLocalRowsFromServer();
 
-    // Son 5 saniye sesli geri sayım uyarısı
+    if (table != null && table.status == 'round_summary') {
+      if (_showdownTicker == null || !_showdownTicker!.isActive) {
+        _startShowdownAnimationTimer();
+      }
+    } else {
+      _showdownTicker?.cancel();
+      _showdownTicker = null;
+    }
+
     if (table != null && table.status == 'playing') {
       final rem = table.turnRemainingSeconds;
       if (rem <= 5 && rem > 0 && rem != _lastBeepSecond) {
@@ -145,12 +275,185 @@ class _TableScreenState extends State<TableScreen> {
     setState(() {});
   }
 
-  void _leaveTable() {
-    if (_isVoiceRecording) {
-      _stopVoiceRecording();
+  Future<void> _confirmAndLeaveTable() async {
+    final gs = GameService.instance;
+    final table = gs.activeTable;
+    final myId = gs.currentUser?.id;
+    final isSeatedInActiveMatch = table != null &&
+        (table.status == 'playing' || table.status == 'round_summary') &&
+        table.seats.any((s) => s?.userId == myId && !s!.isEliminated);
+
+    if (isSeatedInActiveMatch) {
+      final shouldLeave = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: const Color(0xFF0E2F21),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(18),
+            side: const BorderSide(color: Color(0xFFD4AF37), width: 1.5),
+          ),
+          title: const Text(
+            '⚠️ Masadan Ayrıl',
+            style: TextStyle(
+              color: Color(0xFFFDE047),
+              fontWeight: FontWeight.bold,
+              fontSize: 17,
+            ),
+          ),
+          content: const Text(
+            'Oyun şu anda devam ediyor. Lobiye dönerseniz koltuğunuz korunur ve istediğiniz an "Aktif Masana Dön" butonuyla geri gelebilirsiniz.\n\nLobiye dönmek istiyor musunuz?',
+            style: TextStyle(color: Colors.white70, fontSize: 13),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Masada Kal', style: TextStyle(color: Colors.white70)),
+            ),
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFFD4AF37),
+                foregroundColor: Colors.black,
+              ),
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text(
+                'Lobiye Dön',
+                style: TextStyle(fontWeight: FontWeight.bold),
+              ),
+            ),
+          ],
+        ),
+      );
+      if (shouldLeave != true) return;
     }
-    GameService.instance.leaveCurrentTable();
-    Navigator.of(context).pop();
+
+    if (_isVoiceRecording) {
+      await _stopVoiceRecording();
+    }
+    gs.leaveCurrentTable();
+    if (mounted) {
+      Navigator.of(context).pop();
+    }
+  }
+
+  Future<void> _tryDiscardCardWithConfirmation(
+    CardModel card,
+    TableStateModel table,
+  ) async {
+    // Eğer atılmak istenen kağıt Joker (Wild) ise oyuncudan onay al!
+    if (card.isWild(table.wildRank)) {
+      final confirm = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: const Color(0xFF0E2F21),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(18),
+            side: const BorderSide(color: Color(0xFFF59E0B), width: 1.8),
+          ),
+          title: const Text(
+            '🃏 Joker Kağıdı Atıyorsunuz!',
+            style: TextStyle(
+              color: Color(0xFFFDE047),
+              fontWeight: FontWeight.w900,
+              fontSize: 16,
+            ),
+          ),
+          content: Text(
+            'Seçtiğiniz ${card.rankLabel}${card.suitSymbol} kağıdı bu elin JOKER (Wild) kağıdıdır. Yere atmak istediğinize emin misiniz?',
+            style: const TextStyle(color: Colors.white, fontSize: 13),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Vazgeç', style: TextStyle(color: Colors.white70)),
+            ),
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.redAccent,
+                foregroundColor: Colors.white,
+              ),
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Evet, Jokeri At'),
+            ),
+          ],
+        ),
+      );
+      if (confirm != true) return;
+    }
+
+    setState(() {
+      _selectedCardId = null;
+      for (final row in _localRows) {
+        row.removeWhere((c) => c.id == card.id);
+      }
+    });
+    GameService.instance.discardCard(card.id);
+  }
+
+  Future<void> _handleDeclareFinishTap(TableStateModel table) async {
+    final gs = GameService.instance;
+    if (!table.isAssisted) {
+      // Yardımsız (Usta) Modda El Açma Onayı ve Yanma Uyarısı!
+      if (_selectedCardId == null && _allLocalCards.length == 11) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              '⚠️ Yardımsız modda el açmak için önce yere atacağınız 11. kağıda dokunarak seçin!',
+            ),
+            backgroundColor: Color(0xFFB45309),
+          ),
+        );
+        return;
+      }
+
+      final confirm = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: const Color(0xFF1F1212),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(18),
+            side: const BorderSide(color: Color(0xFFEF4444), width: 2),
+          ),
+          title: const Text(
+            '🔥 Yardımsız Mod — El Açma Onayı',
+            style: TextStyle(
+              color: Color(0xFFFDE047),
+              fontWeight: FontWeight.w900,
+              fontSize: 16,
+            ),
+          ),
+          content: const Text(
+            'Seçtiğiniz kağıt yere atılacak ve 3 sıradaki 10 kağıdınız masaya açılacaktır.\n\n'
+            '⚠️ DİKKAT: Eğer 3 sıradaki diziliminiz geçerli per oluşturmuyorsa DİREKT YANMIŞ SAYILIRSINIZ (101+) ve bu maç için tekrar para yatırıp dahil olma (Re-buy) hakkınızı KAYBEDERSİNİZ!\n\n'
+            'Elinizi açmayı onaylıyor musunuz?',
+            style: TextStyle(color: Colors.white, fontSize: 12.5, height: 1.4),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Kontrol Edeyim', style: TextStyle(color: Colors.white70)),
+            ),
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFF10B981),
+                foregroundColor: Colors.white,
+              ),
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text(
+                'ELİM DOĞRU, AÇ!',
+                style: TextStyle(fontWeight: FontWeight.w900),
+              ),
+            ),
+          ],
+        ),
+      );
+      if (confirm != true) return;
+    }
+
+    gs.declareFinish(
+      discardCardId: _selectedCardId ?? table.winningDiscardCardId,
+      rowCardIds: _currentRowIds,
+    );
+    setState(() => _selectedCardId = null);
   }
 
   // ===========================================================================
@@ -159,7 +462,6 @@ class _TableScreenState extends State<TableScreen> {
   Future<void> _onMicPointerDown() async {
     _pttDownTime = DateTime.now();
     if (_isVoiceRecording) {
-      // Zaten dokun-konuş modunda açıksa, ikinci dokunuşta kaydı bitir ve gönder!
       await _stopVoiceRecording();
       return;
     }
@@ -181,7 +483,6 @@ class _TableScreenState extends State<TableScreen> {
         }
         setState(() => _recordingSeconds += 1);
       });
-      // Maksimum 8 saniye sonra otomatik gönder
       _pttAutoStopTimer = Timer(const Duration(seconds: 8), () {
         if (_isVoiceRecording) {
           _stopVoiceRecording();
@@ -193,8 +494,6 @@ class _TableScreenState extends State<TableScreen> {
   Future<void> _onMicPointerUp() async {
     if (!_isVoiceRecording || _pttDownTime == null) return;
     final heldMs = DateTime.now().difference(_pttDownTime!).inMilliseconds;
-    // Eğer kullanıcı 400ms'den uzun basılı tuttuysa (Bas-Konuş), parmağını çekince hemen gönder.
-    // Eğer 400ms'den kısa dokunduysa (Dokun-Konuş), kayda devam etsin (tekrar dokununca veya 5 sn sonra gönderecek)!
     if (heldMs >= 400) {
       await _stopVoiceRecording();
     } else {
@@ -244,7 +543,10 @@ class _TableScreenState extends State<TableScreen> {
               ),
               const SizedBox(height: 16),
               ElevatedButton(
-                onPressed: _leaveTable,
+                onPressed: () {
+                  gs.leaveCurrentTable();
+                  Navigator.of(context).pop();
+                },
                 child: const Text('Lobiye Dön'),
               ),
             ],
@@ -272,201 +574,204 @@ class _TableScreenState extends State<TableScreen> {
     final isMyTurn = isPlaying && table.currentTurnSeat == mySeatIdx;
     final hasDrawn = table.hasDrawnThisTurn;
 
-    return Scaffold(
-      backgroundColor: const Color(0xFF06140E),
-      body: Stack(
-        children: [
-          // 1. ZYNGA 3D MAUN & ZÜMRÜT ÇUHA MASA ARKA PLAN GÖRSELİ (table_bg.jpg)
-          Positioned.fill(
-            child: Image.asset(
-              'assets/images/table_bg.jpg',
-              fit: BoxFit.cover,
-              alignment: const Alignment(0, -0.15),
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) {
+          _confirmAndLeaveTable();
+        }
+      },
+      child: Scaffold(
+        backgroundColor: const Color(0xFF06140E),
+        body: Stack(
+          children: [
+            // 1. ZYNGA 3D MAUN & ZÜMRÜT ÇUHA MASA ARKA PLAN GÖRSELİ
+            Positioned.fill(
+              child: Image.asset(
+                'assets/images/table_bg.jpg',
+                fit: BoxFit.cover,
+                alignment: const Alignment(0, -0.2),
+              ),
             ),
-          ),
 
-          // Hafif karanlık atmosferik çerçeve geçişi (okunabilirliği artırır)
-          Positioned.fill(
-            child: DecoratedBox(
-              decoration: BoxDecoration(
-                gradient: LinearGradient(
-                  begin: Alignment.topCenter,
-                  end: Alignment.bottomCenter,
-                  colors: [
-                    Colors.black.withValues(alpha: 0.45),
-                    Colors.transparent,
-                    Colors.black.withValues(alpha: 0.72),
-                  ],
-                  stops: const [0.0, 0.48, 1.0],
+            Positioned.fill(
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                    colors: [
+                      Colors.black.withValues(alpha: 0.45),
+                      Colors.transparent,
+                      Colors.black.withValues(alpha: 0.82),
+                    ],
+                    stops: const [0.0, 0.42, 1.0],
+                  ),
                 ),
               ),
             ),
-          ),
 
-          // 2. ANA DİKEY ZYNGA MASA DÜZENİ
-          SafeArea(
-            child: Column(
-              children: [
-                // ÜST VIP BAR + MAÇ SÜRESİ & CANLI SAYAÇ BANNERI
-                _buildZyngaTopBar(table, gs),
+            // 2. ANA DİKEY ZYNGA MASA DÜZENİ (ÜST MASA + ALT 3 SIRALI DİKEY ISTAKA)
+            SafeArea(
+              child: Column(
+                children: [
+                  _buildZyngaTopBar(table, gs),
 
-                // ORTA CASINO MASASI (Koltuklar, Altın Fişler, Gösterge Jokeri, Deste ve Atılan Kağıt)
-                Expanded(
-                  flex: 56,
-                  child: _buildZyngaCasinoTableArea(
-                    table: table,
-                    seats: seats,
-                    mySeatIdx: mySeatIdx,
-                    mySeat: mySeat,
-                    isPlaying: isPlaying,
-                    isMyTurn: isMyTurn,
-                    hasDrawn: hasDrawn,
-                    gs: gs,
+                  // ORTA CASINO MASASI (Saat Yönünde Koltuklar, Pot, Gösterge Jokeri, Deste ve Atılan Kağıt)
+                  Expanded(
+                    flex: 46,
+                    child: _buildZyngaCasinoTableArea(
+                      table: table,
+                      seats: seats,
+                      mySeatIdx: mySeatIdx,
+                      mySeat: mySeat,
+                      isPlaying: isPlaying,
+                      isMyTurn: isMyTurn,
+                      hasDrawn: hasDrawn,
+                      gs: gs,
+                    ),
                   ),
-                ),
 
-                // ALT OYUNCU ELİ (TEK SIRA GENİŞ YELPAZE + 60 FPS SÜRÜKLEME + 4 ZYNGA BUTONU)
-                Expanded(
-                  flex: 44,
-                  child: _buildZyngaBottomHandAndControls(
-                    gs: gs,
-                    table: table,
-                    mySeat: mySeat,
-                    mySeatIdx: mySeatIdx,
-                    isMyTurn: isMyTurn,
-                    hasDrawn: hasDrawn,
-                    isPlaying: isPlaying,
+                  // ALT OYUNCU ELİ: 3 SIRALI DİKEY ISTAKA + 60 FPS SÜRÜKLEME + 4 ZYNGA BUTONU
+                  Expanded(
+                    flex: 54,
+                    child: _buildThreeRowBottomHandAndControls(
+                      gs: gs,
+                      table: table,
+                      mySeat: mySeat,
+                      mySeatIdx: mySeatIdx,
+                      isMyTurn: isMyTurn,
+                      hasDrawn: hasDrawn,
+                      isPlaying: isPlaying,
+                    ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
-          ),
 
-          // 3. AKTİF SES KAYDI GÖSTERGESİ (Konuşurken Ekran Üstünde Parlayan Telsiz Barı)
-          if (_isVoiceRecording)
-            Positioned(
-              top: 98,
-              left: 24,
-              right: 24,
-              child: Center(
-                child: GestureDetector(
-                  onTap: _stopVoiceRecording,
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 18,
-                      vertical: 10,
-                    ),
-                    decoration: BoxDecoration(
-                      gradient: const LinearGradient(
-                        colors: [Color(0xFFDC2626), Color(0xFF991B1B)],
+            // 3. AKTİF SES KAYDI GÖSTERGESİ
+            if (_isVoiceRecording)
+              Positioned(
+                top: 96,
+                left: 24,
+                right: 24,
+                child: Center(
+                  child: GestureDetector(
+                    onTap: _stopVoiceRecording,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 18,
+                        vertical: 10,
                       ),
-                      borderRadius: BorderRadius.circular(30),
-                      border: Border.all(
-                        color: const Color(0xFFFDE047),
-                        width: 1.8,
+                      decoration: BoxDecoration(
+                        gradient: const LinearGradient(
+                          colors: [Color(0xFFDC2626), Color(0xFF991B1B)],
+                        ),
+                        borderRadius: BorderRadius.circular(30),
+                        border: Border.all(
+                          color: const Color(0xFFFDE047),
+                          width: 1.8,
+                        ),
                       ),
-                      boxShadow: [
-                        BoxShadow(
-                          color: Colors.redAccent.withValues(alpha: 0.65),
-                          blurRadius: 16,
-                          spreadRadius: 2,
-                        ),
-                      ],
-                    ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        const Icon(
-                          Icons.fiber_manual_record,
-                          color: Colors.white,
-                          size: 16,
-                        ),
-                        const SizedBox(width: 8),
-                        Text(
-                          '🎙️ SES KAYDEDİLİYOR (${_recordingSeconds}s) • Göndermek İçin Dokun / Bırak',
-                          style: const TextStyle(
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Icon(
+                            Icons.fiber_manual_record,
                             color: Colors.white,
-                            fontWeight: FontWeight.w900,
-                            fontSize: 11.5,
+                            size: 16,
                           ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-            ),
-
-          // 4. UÇAN EFEKT KATMANI
-          ..._floatingEffects.map((eff) => _buildFloatingEffectOverlay(eff)),
-
-          // 5. BİLGİ / HATA BİLDİRİMİ
-          if (_toastBanner != null && !_isVoiceRecording)
-            Positioned(
-              top: 96,
-              left: 20,
-              right: 20,
-              child: Center(
-                child: Material(
-                  color: Colors.transparent,
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 16,
-                      vertical: 9,
-                    ),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFF0A2418).withValues(alpha: 0.96),
-                      borderRadius: BorderRadius.circular(20),
-                      border: Border.all(color: const Color(0xFFF59E0B)),
-                      boxShadow: const [
-                        BoxShadow(color: Colors.black87, blurRadius: 12),
-                      ],
-                    ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        const Icon(
-                          Icons.notifications_active,
-                          color: Color(0xFFFBBF24),
-                          size: 16,
-                        ),
-                        const SizedBox(width: 8),
-                        Flexible(
-                          child: Text(
-                            _toastBanner!,
+                          const SizedBox(width: 8),
+                          Text(
+                            '🎙️ SES KAYDEDİLİYOR (${_recordingSeconds}s) • Göndermek İçin Dokun / Bırak',
                             style: const TextStyle(
                               color: Colors.white,
-                              fontWeight: FontWeight.bold,
-                              fontSize: 12,
+                              fontWeight: FontWeight.w900,
+                              fontSize: 11.5,
                             ),
                           ),
-                        ),
-                      ],
+                        ],
+                      ),
                     ),
                   ),
                 ),
               ),
-            ),
 
-          // 6. EL SONU / 101 PUAN TABLOSU MODALI
-          if (_showScoreboardModal || isRoundEnd)
-            _buildScoreboardOverlay(table, mySeat, mySeatIdx, isRoundEnd),
+            // 4. UÇAN EFEKT KATMANI
+            ..._floatingEffects.map((eff) => _buildFloatingEffectOverlay(eff)),
 
-          // 7. MAÇ SONU ŞAMPİYON EKRANI
-          if (isFinished &&
-              table.lastWinnerInfo != null &&
-              !_dismissedWinnerModal)
-            _buildMatchFinishedOverlay(table, mySeatIdx),
+            // 5. BİLGİ / HATA BİLDİRİMİ
+            if (_toastBanner != null && !_isVoiceRecording)
+              Positioned(
+                top: 94,
+                left: 20,
+                right: 20,
+                child: Center(
+                  child: Material(
+                    color: Colors.transparent,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 9,
+                      ),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF0A2418).withValues(alpha: 0.96),
+                        borderRadius: BorderRadius.circular(20),
+                        border: Border.all(color: const Color(0xFFF59E0B)),
+                        boxShadow: const [
+                          BoxShadow(color: Colors.black87, blurRadius: 12),
+                        ],
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Icon(
+                            Icons.notifications_active,
+                            color: Color(0xFFFBBF24),
+                            size: 16,
+                          ),
+                          const SizedBox(width: 8),
+                          Flexible(
+                            child: Text(
+                              _toastBanner!,
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontWeight: FontWeight.bold,
+                                fontSize: 12,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
 
-          // 8. SOHBET ÇEKMECESİ
-          if (_showChatDrawer) _buildChatDrawer(gs),
-        ],
+            // 6. EL SONU ŞEFFAF ANİMASYONLU GÖSTERİM (10 SN AÇAN EL + SAAT YÖNÜNDE CEZA AÇILIŞI)
+            if (isRoundEnd && !_showScoreboardModal)
+              _buildAnimatedShowdownStage(table, mySeat, mySeatIdx),
+
+            // 7. TAM 101 PUAN TABLOSU MODALI
+            if (_showScoreboardModal)
+              _buildScoreboardOverlay(table, mySeat, mySeatIdx, isRoundEnd),
+
+            // 8. MAÇ SONU ŞAMPİYON EKRANI
+            if (isFinished &&
+                table.lastWinnerInfo != null &&
+                !_dismissedWinnerModal)
+              _buildMatchFinishedOverlay(table, mySeatIdx),
+
+            // 9. SOHBET ÇEKMECESİ (+ HIZLI SOHBET KALIPLARI)
+            if (_showChatDrawer) _buildChatDrawer(gs),
+          ],
+        ),
       ),
     );
   }
 
   // ===========================================================================
-  // 1. ZYNGA ÜST VIP BAR + TRAPEZOİD MAÇ SÜRESİ SAYACI (MATCH 09:05)
+  // 1. ZYNGA ÜST VIP BAR + MOD ROZETİ + MAÇ SÜRESİ SAYACI
   // ===========================================================================
   Widget _buildZyngaTopBar(TableStateModel table, GameService gs) {
     final matchTimeStr = _formatDuration(table.matchElapsedSeconds);
@@ -493,9 +798,8 @@ class _TableScreenState extends State<TableScreen> {
           ),
           child: Row(
             children: [
-              // Yuvarlak Altın Çerçeveli Geri Butonu (<)
               InkWell(
-                onTap: _leaveTable,
+                onTap: _confirmAndLeaveTable,
                 borderRadius: BorderRadius.circular(20),
                 child: Container(
                   width: 34,
@@ -519,13 +823,15 @@ class _TableScreenState extends State<TableScreen> {
               ),
               const SizedBox(width: 6),
 
-              // VIP Rozeti
+              // Masa Adı & Yardımlı/Yardımsız Mod Rozeti
               Container(
                 padding:
-                    const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                    const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
                 decoration: BoxDecoration(
-                  gradient: const LinearGradient(
-                    colors: [Color(0xFF1E3A8A), Color(0xFF0F172A)],
+                  gradient: LinearGradient(
+                    colors: table.isAssisted
+                        ? const [Color(0xFF1E3A8A), Color(0xFF0F172A)]
+                        : const [Color(0xFF991B1B), Color(0xFF450A0A)],
                   ),
                   borderRadius: BorderRadius.circular(18),
                   border: Border.all(
@@ -536,18 +842,21 @@ class _TableScreenState extends State<TableScreen> {
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    const Text('👑', style: TextStyle(fontSize: 12)),
+                    Text(
+                      table.isAssisted ? '✨' : '🔥',
+                      style: const TextStyle(fontSize: 12),
+                    ),
                     const SizedBox(width: 4),
                     ConstrainedBox(
-                      constraints: const BoxConstraints(maxWidth: 85),
+                      constraints: const BoxConstraints(maxWidth: 86),
                       child: Text(
-                        table.name,
+                        table.isAssisted ? 'Yardımlı' : 'Yardımsız',
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: const TextStyle(
                           color: Color(0xFFFDE047),
                           fontWeight: FontWeight.w900,
-                          fontSize: 11,
+                          fontSize: 10.5,
                         ),
                       ),
                     ),
@@ -629,7 +938,7 @@ class _TableScreenState extends State<TableScreen> {
               ),
               const SizedBox(width: 5),
 
-              // TELSİZ MİKROFON (Hem Basılı Tut hem Dokun-Konuş - Kesintisiz Listener!)
+              // TELSİZ MİKROFON
               Listener(
                 onPointerDown: (_) => _onMicPointerDown(),
                 onPointerUp: (_) => _onMicPointerUp(),
@@ -676,7 +985,6 @@ class _TableScreenState extends State<TableScreen> {
               ),
               const SizedBox(width: 5),
 
-              // Ses Aç/Kapat & Sohbet İkonları
               InkWell(
                 onTap: () async {
                   await SoundFx.setSoundEnabled(!SoundFx.soundEnabled);
@@ -724,9 +1032,9 @@ class _TableScreenState extends State<TableScreen> {
           ),
         ),
 
-        // ZYNGA ALTIN TRAPEZOİD SÜRE BANDI ("MAÇ 09:05 • HAMLE 28s")
+        // ZYNGA ALTIN TRAPEZOİD SÜRE BANDI
         Container(
-          padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 3.5),
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 3),
           decoration: BoxDecoration(
             gradient: const LinearGradient(
               colors: [Color(0xFF2B1911), Color(0xFF422719), Color(0xFF2B1911)],
@@ -738,9 +1046,6 @@ class _TableScreenState extends State<TableScreen> {
               color: const Color(0xFFD4AF37).withValues(alpha: 0.8),
               width: 1.2,
             ),
-            boxShadow: const [
-              BoxShadow(color: Colors.black54, blurRadius: 6),
-            ],
           ),
           child: Row(
             mainAxisSize: MainAxisSize.min,
@@ -748,18 +1053,18 @@ class _TableScreenState extends State<TableScreen> {
               const Icon(
                 Icons.timer_outlined,
                 color: Color(0xFFFDE047),
-                size: 13,
+                size: 12,
               ),
               const SizedBox(width: 5),
               Text(
                 isPlaying || table.roundNumber > 0
-                    ? 'MAÇ SÜRESİ $matchTimeStr  •  EL #${table.roundNumber}'
-                    : 'MASA BEKLİYOR (${table.entryFee} KREDİ)',
+                    ? 'MAÇ $matchTimeStr  •  EL #${table.roundNumber}'
+                    : '${table.name} (${table.entryFee} 🪙)',
                 style: const TextStyle(
                   color: Color(0xFFFDE047),
                   fontWeight: FontWeight.w900,
-                  fontSize: 11,
-                  letterSpacing: 0.7,
+                  fontSize: 10.5,
+                  letterSpacing: 0.5,
                 ),
               ),
               if (isPlaying) ...[
@@ -780,7 +1085,7 @@ class _TableScreenState extends State<TableScreen> {
                           ? Colors.white
                           : Colors.black,
                       fontWeight: FontWeight.w900,
-                      fontSize: 10.5,
+                      fontSize: 10,
                     ),
                   ),
                 ),
@@ -793,7 +1098,7 @@ class _TableScreenState extends State<TableScreen> {
   }
 
   // ===========================================================================
-  // 2. ZYNGA CASINO MASASI (MASA KENARI AVATARLARI + ORTA JOKER/DESTE/ATILAN)
+  // 2. ZYNGA CASINO MASASI (SAAT YÖNÜNDE GÖRECELİ KOLTUKLAR + ORTA DESTE/JOKER)
   // ===========================================================================
   Widget _buildZyngaCasinoTableArea({
     required TableStateModel table,
@@ -810,50 +1115,16 @@ class _TableScreenState extends State<TableScreen> {
         final w = constraints.maxWidth;
         final h = constraints.maxHeight;
 
-        // Koltukları masa etrafındaki 6 noktaya (Sol-Üst, Sağ-Üst, Sol-Orta, Sağ-Orta, Sol-Alt, Sağ-Alt) yerleştir
-        final seatPositions = _calculateTableRimPositions(seats.length, w, h);
+        // Koltukları yerel oyuncuya göre saat yönünde döndür (ben her zaman sol-alt / kendi bakış açımda)
+        final seatPositions =
+            _calculateRelativeSeatPositions(seats.length, mySeatIdx, w, h);
 
         return Stack(
           clipBehavior: Clip.none,
           children: [
-            // ÜST ORTA: ALTIN FİŞ YIĞINI (POT GÖSTERGESİ)
-            Positioned(
-              top: 6,
-              left: 0,
-              right: 0,
-              child: Center(
-                child: Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-                  decoration: BoxDecoration(
-                    color: Colors.black.withValues(alpha: 0.55),
-                    borderRadius: BorderRadius.circular(20),
-                    border: Border.all(
-                      color: const Color(0xFFD4AF37).withValues(alpha: 0.7),
-                    ),
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      const Text('🪙🪙', style: TextStyle(fontSize: 13)),
-                      const SizedBox(width: 5),
-                      Text(
-                        'ÖDÜL HAVUZU: ${table.pot} KREDİ',
-                        style: const TextStyle(
-                          color: Color(0xFFFDE047),
-                          fontWeight: FontWeight.w900,
-                          fontSize: 10.5,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-
-            // MASA ORTASI: GÖSTERGE JOKERİ + KAPALI DESTE + ATILAN KAĞIT (veya Hazır Ol ekranı)
+            // MASA ORTASI: GÖSTERGE JOKERİ + KAPALI DESTE + ATILAN KAĞIT
             Align(
-              alignment: const Alignment(0, 0.08),
+              alignment: const Alignment(0, 0.05),
               child: _buildCenterTableFeltCards(
                 table: table,
                 isPlaying: isPlaying,
@@ -865,7 +1136,7 @@ class _TableScreenState extends State<TableScreen> {
               ),
             ),
 
-            // MASA KENARINDAKİ DÜairesel ZYNGA OYUNCU AVATARLARI VE CANLI SAYAÇ HALKALARI
+            // SAAT YÖNÜNDE YERLEŞTİRİLMİŞ OYUNCU AVATARLARI
             for (int i = 0; i < seats.length; i++)
               Positioned(
                 left: seatPositions[i].dx,
@@ -878,56 +1149,107 @@ class _TableScreenState extends State<TableScreen> {
                   gs: gs,
                 ),
               ),
+
+            // UÇAN KART ANİMASYONU (Çekilen veya Atılan Kart)
+            if (_activeFlyingCardAnim != null)
+              Center(
+                child: TweenAnimationBuilder<double>(
+                  tween: Tween(begin: 0.6, end: 1.0),
+                  duration: const Duration(milliseconds: 320),
+                  curve: Curves.easeOutBack,
+                  builder: (context, val, _) {
+                    return Transform.scale(
+                      scale: val,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 6,
+                        ),
+                        decoration: BoxDecoration(
+                          color: Colors.black87,
+                          borderRadius: BorderRadius.circular(14),
+                          border: Border.all(color: const Color(0xFFFDE047)),
+                        ),
+                        child: Text(
+                          _activeFlyingCardAnim!['type'] == 'draw'
+                              ? '🃏 Desteden Kağıt Çekildi'
+                              : '🃏 Yere Kağıt Atıldı',
+                          style: const TextStyle(
+                            color: Color(0xFFFDE047),
+                            fontWeight: FontWeight.w900,
+                            fontSize: 11,
+                          ),
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              ),
           ],
         );
       },
     );
   }
 
-  List<Offset> _calculateTableRimPositions(int count, double w, double h) {
-    const double avatarWidth = 92.0;
+  /// Yerel oyuncuyu (mySeatIdx) her zaman sol-alta koyup diğer koltukları saat yönünde (Sol-Üst -> Sağ-Üst -> Sağ-Orta -> Sağ-Alt) dizer
+  List<Offset> _calculateRelativeSeatPositions(
+    int count,
+    int mySeatIdx,
+    double w,
+    double h,
+  ) {
+    const double avatarWidth = 88.0;
     final double leftX = 6.0;
     final double rightX = w - avatarWidth - 6.0;
 
+    // Saat yönünde ekran etrafındaki koltuk koordinatları (0. indeks yerel oyuncunun koltuğu)
+    List<Offset> clockwiseSlots;
     if (count == 2) {
-      return [
-        Offset(leftX + 14, h * 0.08),
-        Offset(rightX - 14, h * 0.08),
+      clockwiseSlots = [
+        Offset(leftX + 8, h * 0.50), // Sen (Sol-Alt)
+        Offset(rightX - 8, h * 0.04), // Rakip (Sağ-Üst)
       ];
     } else if (count == 3) {
-      return [
-        Offset(leftX + 10, h * 0.06),
-        Offset(rightX - 10, h * 0.06),
-        Offset(leftX, h * 0.48),
+      clockwiseSlots = [
+        Offset(leftX + 6, h * 0.52), // 0: Sen (Sol-Alt)
+        Offset(leftX + 10, h * 0.03), // 1: Sol-Üst
+        Offset(rightX - 10, h * 0.03), // 2: Sağ-Üst
       ];
     } else if (count == 4) {
-      return [
-        Offset(leftX + 10, h * 0.05),
-        Offset(rightX - 10, h * 0.05),
-        Offset(leftX, h * 0.48),
-        Offset(rightX, h * 0.48),
+      clockwiseSlots = [
+        Offset(leftX + 4, h * 0.52), // 0: Sen (Sol-Alt)
+        Offset(leftX + 8, h * 0.03), // 1: Sol-Üst
+        Offset(rightX - 8, h * 0.03), // 2: Sağ-Üst
+        Offset(rightX - 4, h * 0.52), // 3: Sağ-Alt
       ];
     } else if (count == 5) {
-      return [
-        Offset(leftX + 12, h * 0.03),
-        Offset(rightX - 12, h * 0.03),
-        Offset(leftX, h * 0.36),
-        Offset(rightX, h * 0.36),
-        Offset(leftX + 6, h * 0.68),
+      clockwiseSlots = [
+        Offset(leftX + 4, h * 0.58), // 0: Sen
+        Offset(leftX + 2, h * 0.26), // 1: Sol-Orta
+        Offset(leftX + 14, h * 0.02), // 2: Sol-Üst
+        Offset(rightX - 14, h * 0.02), // 3: Sağ-Üst
+        Offset(rightX - 4, h * 0.45), // 4: Sağ-Alt
       ];
     } else {
-      return [
-        Offset(leftX + 12, h * 0.03),
-        Offset(rightX - 12, h * 0.03),
-        Offset(leftX, h * 0.36),
-        Offset(rightX, h * 0.36),
-        Offset(leftX + 8, h * 0.68),
-        Offset(rightX - 8, h * 0.68),
+      clockwiseSlots = [
+        Offset(leftX + 4, h * 0.60), // 0: Sen
+        Offset(leftX + 2, h * 0.30), // 1: Sol-Orta
+        Offset(leftX + 12, h * 0.02), // 2: Sol-Üst
+        Offset(rightX - 12, h * 0.02), // 3: Sağ-Üst
+        Offset(rightX - 2, h * 0.30), // 4: Sağ-Orta
+        Offset(rightX - 4, h * 0.60), // 5: Sağ-Alt
       ];
     }
+
+    final anchor = mySeatIdx >= 0 ? mySeatIdx : 0;
+    final result = List<Offset>.filled(count, Offset.zero);
+    for (int seatIdx = 0; seatIdx < count; seatIdx++) {
+      final rel = (seatIdx - anchor + count) % count;
+      result[seatIdx] = clockwiseSlots[rel];
+    }
+    return result;
   }
 
-  /// Zynga UI Mockup'ındaki gibi Dairesel Avatar + Parlayan Geri Sayım Halkası + Alt Puan Etiketi
   Widget _buildZyngaCircularSeatAvatar({
     required SeatPlayerModel? seat,
     required int seatIndex,
@@ -939,6 +1261,8 @@ class _TableScreenState extends State<TableScreen> {
     final isMe = seatIndex == mySeatIdx && mySeatIdx != -1;
     final isCurrentTurn =
         table.status == 'playing' && table.currentTurnSeat == seatIndex;
+    final isDealer =
+        table.status == 'playing' && table.dealerSeat == seatIndex;
 
     if (isEmpty) {
       final canSit = mySeatIdx == -1 &&
@@ -951,13 +1275,13 @@ class _TableScreenState extends State<TableScreen> {
               }
             : null,
         child: SizedBox(
-          width: 92,
+          width: 88,
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
               Container(
-                width: 52,
-                height: 52,
+                width: 46,
+                height: 46,
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
                   color: Colors.black.withValues(alpha: 0.55),
@@ -971,13 +1295,13 @@ class _TableScreenState extends State<TableScreen> {
                 child: Icon(
                   canSit ? Icons.add_rounded : Icons.event_seat_outlined,
                   color: canSit ? const Color(0xFFFDE047) : Colors.white38,
-                  size: 24,
+                  size: 22,
                 ),
               ),
-              const SizedBox(height: 3),
+              const SizedBox(height: 2),
               Container(
                 padding:
-                    const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                    const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
                 decoration: BoxDecoration(
                   color: Colors.black.withValues(alpha: 0.7),
                   borderRadius: BorderRadius.circular(10),
@@ -988,7 +1312,7 @@ class _TableScreenState extends State<TableScreen> {
                   style: TextStyle(
                     color: canSit ? const Color(0xFFFDE047) : Colors.white54,
                     fontWeight: FontWeight.w800,
-                    fontSize: 9.5,
+                    fontSize: 9,
                   ),
                 ),
               ),
@@ -1000,14 +1324,16 @@ class _TableScreenState extends State<TableScreen> {
 
     final avatar = VipAvatar.fromKey(seat.avatar);
     final isSpeaking = gs.activeVoiceSpeakerUsername == seat.username;
+    final maxDur = math.max(1, table.turnDurationSeconds);
     final progress = isCurrentTurn
-        ? (table.turnRemainingSeconds / 30.0).clamp(0.0, 1.0)
+        ? (table.turnRemainingSeconds / maxDur).clamp(0.0, 1.0)
         : 0.0;
     final ringColor = table.turnRemainingSeconds <= 5
         ? const Color(0xFFEF4444)
         : table.turnRemainingSeconds <= 12
             ? const Color(0xFFFACC15)
             : const Color(0xFF22C55E);
+    final speechBubble = _seatSpeechBubbles[seat.userId];
 
     return GestureDetector(
       onTap: () {
@@ -1016,38 +1342,63 @@ class _TableScreenState extends State<TableScreen> {
         }
       },
       child: SizedBox(
-        width: 92,
+        width: 88,
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            // Dairesel Avatar + 360 Derece Canlı Geri Sayım Halkası
+            if (speechBubble != null)
+              Container(
+                margin: const EdgeInsets.only(bottom: 3),
+                padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(10),
+                  boxShadow: const [
+                    BoxShadow(color: Colors.black54, blurRadius: 4),
+                  ],
+                ),
+                child: Text(
+                  speechBubble,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: Colors.black87,
+                    fontWeight: FontWeight.w800,
+                    fontSize: 9.5,
+                  ),
+                ),
+              ),
             Stack(
               alignment: Alignment.center,
               children: [
                 if (isCurrentTurn)
                   Container(
-                    width: 60,
-                    height: 60,
+                    width: 54,
+                    height: 54,
                     decoration: BoxDecoration(
                       shape: BoxShape.circle,
                       boxShadow: [
                         BoxShadow(
                           color: ringColor.withValues(alpha: 0.65),
-                          blurRadius: 14,
-                          spreadRadius: 2,
+                          blurRadius: 12,
+                          spreadRadius: 1.5,
                         ),
                       ],
                     ),
-                    child: CircularProgressIndicator(
-                      value: progress,
-                      strokeWidth: 4.2,
-                      backgroundColor: Colors.black45,
-                      valueColor: AlwaysStoppedAnimation<Color>(ringColor),
+                    child: TweenAnimationBuilder<double>(
+                      tween: Tween<double>(begin: progress, end: progress),
+                      duration: const Duration(milliseconds: 900),
+                      builder: (context, val, _) => CircularProgressIndicator(
+                        value: val,
+                        strokeWidth: 3.8,
+                        backgroundColor: Colors.black45,
+                        valueColor: AlwaysStoppedAnimation<Color>(ringColor),
+                      ),
                     ),
                   ),
                 Container(
-                  width: 50,
-                  height: 50,
+                  width: 45,
+                  height: 45,
                   decoration: BoxDecoration(
                     shape: BoxShape.circle,
                     gradient: RadialGradient(
@@ -1057,21 +1408,68 @@ class _TableScreenState extends State<TableScreen> {
                       ],
                     ),
                     border: Border.all(
-                      color: isSpeaking
-                          ? const Color(0xFF22C55E)
-                          : isMe
-                              ? const Color(0xFFFACC15)
-                              : const Color(0xFFD4AF37),
+                      color: !seat.isConnected
+                          ? Colors.grey
+                          : isSpeaking
+                              ? const Color(0xFF22C55E)
+                              : isMe
+                                  ? const Color(0xFFFACC15)
+                                  : const Color(0xFFD4AF37),
                       width: 2.0,
                     ),
                   ),
                   child: Center(
                     child: Text(
                       avatar.emoji,
-                      style: const TextStyle(fontSize: 24),
+                      style: const TextStyle(fontSize: 22),
                     ),
                   ),
                 ),
+
+                // Dağıtan (Dealer 'D') Rozeti (Sol Alt)
+                if (isDealer)
+                  Positioned(
+                    left: 0,
+                    bottom: 0,
+                    child: Container(
+                      width: 17,
+                      height: 17,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: const Color(0xFFFACC15),
+                        border: Border.all(color: Colors.black, width: 1),
+                      ),
+                      child: const Center(
+                        child: Text(
+                          'D',
+                          style: TextStyle(
+                            color: Colors.black,
+                            fontWeight: FontWeight.w900,
+                            fontSize: 9.5,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+
+                // Bağlantı Kopuk Rozeti
+                if (!seat.isConnected)
+                  Positioned(
+                    right: 0,
+                    bottom: 0,
+                    child: Container(
+                      padding: const EdgeInsets.all(2),
+                      decoration: const BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: Colors.redAccent,
+                      ),
+                      child: const Icon(
+                        Icons.wifi_off_rounded,
+                        color: Colors.white,
+                        size: 10,
+                      ),
+                    ),
+                  ),
 
                 // Elindeki Kağıt Sayısı Rozeti (Sağ Üst)
                 if (table.status == 'playing' && !seat.isEliminated)
@@ -1081,7 +1479,7 @@ class _TableScreenState extends State<TableScreen> {
                     child: Container(
                       padding: const EdgeInsets.symmetric(
                         horizontal: 5,
-                        vertical: 1.5,
+                        vertical: 1,
                       ),
                       decoration: BoxDecoration(
                         color: const Color(0xFF1E293B),
@@ -1096,46 +1494,25 @@ class _TableScreenState extends State<TableScreen> {
                         style: const TextStyle(
                           color: Colors.white,
                           fontWeight: FontWeight.w900,
-                          fontSize: 9.5,
+                          fontSize: 9,
                         ),
-                      ),
-                    ),
-                  ),
-
-                // Konuşuyor İkonu
-                if (isSpeaking)
-                  Positioned(
-                    left: 0,
-                    top: 0,
-                    child: Container(
-                      padding: const EdgeInsets.all(3),
-                      decoration: const BoxDecoration(
-                        shape: BoxShape.circle,
-                        color: Color(0xFF10B981),
-                      ),
-                      child: const Icon(
-                        Icons.volume_up,
-                        color: Colors.white,
-                        size: 11,
                       ),
                     ),
                   ),
               ],
             ),
-            const SizedBox(height: 3),
-
-            // İsim ve Puan Etiketi (Zynga Stil Altın Çerçeveli Siyah Kapsül)
+            const SizedBox(height: 2),
             Container(
-              width: 90,
-              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+              width: 86,
+              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2.5),
               decoration: BoxDecoration(
                 color: Colors.black.withValues(alpha: 0.82),
-                borderRadius: BorderRadius.circular(10),
+                borderRadius: BorderRadius.circular(9),
                 border: Border.all(
                   color: isCurrentTurn
                       ? ringColor
                       : const Color(0xFFD4AF37).withValues(alpha: 0.65),
-                  width: 1.1,
+                  width: 1.0,
                 ),
               ),
               child: Column(
@@ -1148,28 +1525,20 @@ class _TableScreenState extends State<TableScreen> {
                     style: TextStyle(
                       color: isMe ? const Color(0xFFFDE047) : Colors.white,
                       fontWeight: FontWeight.w800,
-                      fontSize: 10,
+                      fontSize: 9.5,
                     ),
                   ),
-                  const SizedBox(height: 1),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      const Text('🪙', style: TextStyle(fontSize: 9)),
-                      const SizedBox(width: 3),
-                      Text(
-                        seat.isEliminated
-                            ? 'YANDI (${seat.totalScore})'
-                            : '${seat.totalScore}/101',
-                        style: TextStyle(
-                          color: seat.isEliminated || seat.totalScore >= 85
-                              ? Colors.redAccent
-                              : const Color(0xFFFDE047),
-                          fontWeight: FontWeight.w900,
-                          fontSize: 9.5,
-                        ),
-                      ),
-                    ],
+                  Text(
+                    seat.isEliminated
+                        ? (seat.forfeitedRebuy ? 'Hatalı Açtı' : 'YANDI (${seat.totalScore})')
+                        : '${seat.totalScore}/101',
+                    style: TextStyle(
+                      color: seat.isEliminated || seat.totalScore >= 85
+                          ? Colors.redAccent
+                          : const Color(0xFFFDE047),
+                      fontWeight: FontWeight.w900,
+                      fontSize: 9,
+                    ),
                   ),
                 ],
               ),
@@ -1180,7 +1549,7 @@ class _TableScreenState extends State<TableScreen> {
     );
   }
 
-  /// Masa Ortası: Gösterge Jokeri (Sol) + Kapalı Deste (Sağ) + Atılan Kağıt (Alt Orta)
+  /// Masa Ortası: Gösterge Jokeri (Sol) + Kapalı Deste (Orta) + Atılan Kağıt (Sağ - Yan Yana Kompakt)
   Widget _buildCenterTableFeltCards({
     required TableStateModel table,
     required bool isPlaying,
@@ -1190,27 +1559,29 @@ class _TableScreenState extends State<TableScreen> {
     required SeatPlayerModel? mySeat,
     required GameService gs,
   }) {
-    if (!isPlaying) {
+    if (!isPlaying && table.status != 'round_summary') {
       return Container(
-        width: 230,
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        width: 225,
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
         decoration: BoxDecoration(
-          color: Colors.black.withValues(alpha: 0.62),
+          color: Colors.black.withValues(alpha: 0.68),
           borderRadius: BorderRadius.circular(18),
           border: Border.all(
-            color: const Color(0xFFD4AF37).withValues(alpha: 0.75),
+            color: const Color(0xFFD4AF37).withValues(alpha: 0.8),
             width: 1.5,
           ),
         ),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Text(
-              '👑 YUNAN YANIK VIP',
-              style: TextStyle(
+            Text(
+              table.isAssisted
+                  ? '✨ YARDIMLI MOD MASASI'
+                  : '🔥 YARDIMSIZ (USTA) MASA',
+              style: const TextStyle(
                 color: Color(0xFFFDE047),
                 fontWeight: FontWeight.w900,
-                fontSize: 13,
+                fontSize: 12,
               ),
             ),
             const SizedBox(height: 4),
@@ -1222,7 +1593,7 @@ class _TableScreenState extends State<TableScreen> {
               style: const TextStyle(color: Colors.white70, fontSize: 10.5),
             ),
             if (mySeat != null) ...[
-              const SizedBox(height: 10),
+              const SizedBox(height: 8),
               SizedBox(
                 width: double.infinity,
                 child: ElevatedButton.icon(
@@ -1236,7 +1607,7 @@ class _TableScreenState extends State<TableScreen> {
                         : const Color(0xFFD4AF37),
                     foregroundColor:
                         mySeat.isReady ? Colors.white : Colors.black,
-                    padding: const EdgeInsets.symmetric(vertical: 9),
+                    padding: const EdgeInsets.symmetric(vertical: 8),
                     shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(12),
                     ),
@@ -1254,16 +1625,15 @@ class _TableScreenState extends State<TableScreen> {
                   ),
                 ),
               ),
-              const SizedBox(height: 4),
               InkWell(
                 onTap: () => gs.standUp(),
                 child: const Padding(
-                  padding: EdgeInsets.all(4.0),
+                  padding: EdgeInsets.only(top: 4),
                   child: Text(
                     'Koltuktan Kalk',
                     style: TextStyle(
                       color: Colors.white54,
-                      fontSize: 10.5,
+                      fontSize: 10,
                       decoration: TextDecoration.underline,
                     ),
                   ),
@@ -1280,149 +1650,211 @@ class _TableScreenState extends State<TableScreen> {
     final discardTop = table.topDiscardCard;
     final canDrawNow = isMyTurn && !hasDrawn;
 
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        // ÜST SIRA: SOLDA GÖSTERGE JOKERİ, SAĞDA 3D KAPALI DESTE (Tasarım Görseliyle Birebir!)
-        Row(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.end,
-          children: [
-            // 1. GÖSTERGE JOKERİ (Üstünde Altın Taç + Altında JOKER 7♥ Yazısı)
-            Column(
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: _dragReadyToDiscardUp
+            ? const Color(0xFF10B981).withValues(alpha: 0.25)
+            : Colors.black.withValues(alpha: 0.22),
+        borderRadius: BorderRadius.circular(16),
+        border: _dragReadyToDiscardUp
+            ? Border.all(color: const Color(0xFF4ADE80), width: 2)
+            : null,
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          // 1. GÖSTERGE JOKERİ
+          Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text('👑', style: TextStyle(fontSize: 15, height: 1.0)),
+              const SizedBox(height: 2),
+              if (indicator != null)
+                PlayingCardWidget(
+                  card: indicator,
+                  wildRank: table.wildRank,
+                  width: 52,
+                  height: 74,
+                )
+              else
+                const SizedBox(width: 52, height: 74),
+              const SizedBox(height: 3),
+              Text(
+                indicator != null
+                    ? 'JOKER ${indicator.rankLabel}${indicator.suitSymbol}'
+                    : 'JOKER',
+                style: const TextStyle(
+                  color: Color(0xFFFDE047),
+                  fontWeight: FontWeight.w900,
+                  fontSize: 9.5,
+                  shadows: [Shadow(color: Colors.black, blurRadius: 4)],
+                ),
+              ),
+            ],
+          ),
+
+          const SizedBox(width: 12),
+
+          // 2. 3D KAPALI DESTE
+          GestureDetector(
+            onTap: canDrawNow ? () => gs.drawCard() : null,
+            child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                const Text('👑', style: TextStyle(fontSize: 18, height: 1.0)),
-                const SizedBox(height: 2),
-                if (indicator != null)
-                  PlayingCardWidget(
-                    card: indicator,
-                    wildRank: table.wildRank,
-                    width: 60,
-                    height: 86,
-                  )
-                else
-                  const SizedBox(width: 60, height: 86),
-                const SizedBox(height: 4),
+                AnimatedContainer(
+                  duration: const Duration(milliseconds: 220),
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(10),
+                    boxShadow: canDrawNow
+                        ? [
+                            BoxShadow(
+                              color: const Color(0xFF22C55E)
+                                  .withValues(alpha: 0.8),
+                              blurRadius: 14,
+                              spreadRadius: 2,
+                            ),
+                          ]
+                        : null,
+                  ),
+                  child: CardBackWidget(
+                    width: 52,
+                    height: 74,
+                    deckCount: drawCount,
+                  ),
+                ),
+                const SizedBox(height: 3),
                 Text(
-                  indicator != null
-                      ? 'JOKER ${indicator.rankLabel}${indicator.suitSymbol}'
-                      : 'JOKER',
+                  canDrawNow ? '👇 ÇEK ($drawCount)' : 'DESTE $drawCount',
+                  style: TextStyle(
+                    color: canDrawNow
+                        ? const Color(0xFF4ADE80)
+                        : const Color(0xFFFDE047),
+                    fontWeight: FontWeight.w900,
+                    fontSize: 9.5,
+                    shadows: const [
+                      Shadow(color: Colors.black, blurRadius: 4),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+
+          const SizedBox(width: 12),
+
+          // 3. ATILAN KAĞIT (Tıklanınca Atılan Kağıtlar Geçmişini Açar)
+          GestureDetector(
+            onTap: () => _showDiscardHistorySheet(table),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                discardTop != null
+                    ? PlayingCardWidget(
+                        card: discardTop,
+                        wildRank: table.wildRank,
+                        width: 52,
+                        height: 74,
+                      )
+                    : Container(
+                        width: 52,
+                        height: 74,
+                        decoration: BoxDecoration(
+                          color: Colors.black.withValues(alpha: 0.28),
+                          borderRadius: BorderRadius.circular(9),
+                          border: Border.all(
+                            color: const Color(0xFFD4AF37).withValues(alpha: 0.4),
+                          ),
+                        ),
+                        child: const Center(
+                          child: Text(
+                            'ATILAN',
+                            style: TextStyle(
+                              color: Colors.white38,
+                              fontWeight: FontWeight.bold,
+                              fontSize: 8.5,
+                            ),
+                          ),
+                        ),
+                      ),
+                const SizedBox(height: 3),
+                Text(
+                  discardTop != null
+                      ? 'ATILAN ${discardTop.rankLabel}${discardTop.suitSymbol}'
+                      : 'ATILAN',
                   style: const TextStyle(
                     color: Color(0xFFFDE047),
                     fontWeight: FontWeight.w900,
-                    fontSize: 10.5,
+                    fontSize: 9.5,
                     shadows: [Shadow(color: Colors.black, blurRadius: 4)],
                   ),
                 ),
               ],
             ),
+          ),
+        ],
+      ),
+    );
+  }
 
-            const SizedBox(width: 22),
-
-            // 2. 3D KAPALI DESTE (DESTE 54)
-            GestureDetector(
-              onTap: canDrawNow ? () => gs.drawCard() : null,
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  AnimatedContainer(
-                    duration: const Duration(milliseconds: 220),
-                    decoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(10),
-                      boxShadow: canDrawNow
-                          ? [
-                              BoxShadow(
-                                color: const Color(0xFF22C55E)
-                                    .withValues(alpha: 0.8),
-                                blurRadius: 16,
-                                spreadRadius: 2,
-                              ),
-                            ]
-                          : null,
-                    ),
-                    child: CardBackWidget(
-                      width: 60,
-                      height: 86,
-                      deckCount: drawCount,
-                    ),
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    canDrawNow ? '👇 DESTE $drawCount' : 'DESTE $drawCount',
-                    style: TextStyle(
-                      color: canDrawNow
-                          ? const Color(0xFF4ADE80)
-                          : const Color(0xFFFDE047),
-                      fontWeight: FontWeight.w900,
-                      fontSize: 10.5,
-                      shadows: const [
-                        Shadow(color: Colors.black, blurRadius: 4),
-                      ],
-                    ),
-                  ),
-                ],
+  void _showDiscardHistorySheet(TableStateModel table) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF0A2418),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) {
+        final history = table.discardHistory.reversed.toList();
+        return Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                '🗑️ Yere Atılan Son Kağıtlar',
+                style: TextStyle(
+                  color: Color(0xFFFDE047),
+                  fontWeight: FontWeight.w900,
+                  fontSize: 15,
+                ),
               ),
-            ),
-          ],
-        ),
-
-        const SizedBox(height: 8),
-
-        // ALT ORTA: ATILAN KAĞIT (ATILAN K♠)
-        Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(
-              discardTop != null
-                  ? 'ATILAN ${discardTop.rankLabel}${discardTop.suitSymbol}'
-                  : 'ATILAN KAĞIT',
-              style: const TextStyle(
-                color: Color(0xFFFDE047),
-                fontWeight: FontWeight.w900,
-                fontSize: 10,
-                shadows: [Shadow(color: Colors.black, blurRadius: 4)],
-              ),
-            ),
-            const SizedBox(height: 3),
-            discardTop != null
-                ? PlayingCardWidget(
-                    card: discardTop,
-                    wildRank: table.wildRank,
-                    width: 58,
-                    height: 82,
-                  )
-                : Container(
-                    width: 58,
-                    height: 82,
-                    decoration: BoxDecoration(
-                      color: Colors.black.withValues(alpha: 0.25),
-                      borderRadius: BorderRadius.circular(9),
-                      border: Border.all(
-                        color: const Color(0xFFD4AF37).withValues(alpha: 0.35),
-                      ),
-                    ),
-                    child: const Center(
+              const SizedBox(height: 12),
+              history.isEmpty
+                  ? const Padding(
+                      padding: EdgeInsets.symmetric(vertical: 16),
                       child: Text(
-                        'BOŞ',
-                        style: TextStyle(
-                          color: Colors.white38,
-                          fontWeight: FontWeight.bold,
-                          fontSize: 9.5,
+                        'Bu elde henüz yere kağıt atılmadı.',
+                        style: TextStyle(color: Colors.white54),
+                      ),
+                    )
+                  : SizedBox(
+                      height: 92,
+                      child: ListView.separated(
+                        scrollDirection: Axis.horizontal,
+                        itemCount: history.length,
+                        separatorBuilder: (_, _) => const SizedBox(width: 8),
+                        itemBuilder: (_, idx) => PlayingCardWidget(
+                          card: history[idx],
+                          wildRank: table.wildRank,
+                          width: 60,
+                          height: 86,
                         ),
                       ),
                     ),
-                  ),
-          ],
-        ),
-      ],
+            ],
+          ),
+        );
+      },
     );
   }
 
   // ===========================================================================
-  // 3. ALT OYUNCU ELİ (TEK SIRA GENİŞ YELPAZE + 60 FPS SIFIR GECİKMELİ SÜRÜKLEME)
+  // 3. ALT OYUNCU ELİ: 3 SIRALI DİKEY ISTAKA + 60 FPS SÜRÜKLEME (SATIR İÇİ & SATIRLAR ARASI)
   // ===========================================================================
-  Widget _buildZyngaBottomHandAndControls({
+  Widget _buildThreeRowBottomHandAndControls({
     required GameService gs,
     required TableStateModel table,
     required SeatPlayerModel? mySeat,
@@ -1431,58 +1863,71 @@ class _TableScreenState extends State<TableScreen> {
     required bool hasDrawn,
     required bool isPlaying,
   }) {
-    final meldedIds = table.meldedCardIds;
-    final canFinish = table.canFinishNow;
+    final isAssisted = table.isAssisted;
+    final meldedIds = isAssisted ? table.meldedCardIds : <String>{};
+    final canFinish = isAssisted
+        ? table.canFinishNow
+        : (_allLocalCards.length == 11 && hasDrawn);
     final deadwoodPoints = table.currentHandPenalty;
 
     return Column(
       children: [
-        // ÜST MİNİ DURUM BANDI (Elde Kalan Sayı & İpucu)
+        // ÜST DURUM BANDI (Yardımlı modda Ceza Puanı, Yardımsız modda Usta Mod Uyarısı)
         Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 14),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
           child: Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
               Container(
                 padding:
-                    const EdgeInsets.symmetric(horizontal: 11, vertical: 3.5),
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
                 decoration: BoxDecoration(
-                  color: Colors.black.withValues(alpha: 0.72),
-                  borderRadius: BorderRadius.circular(16),
+                  color: Colors.black.withValues(alpha: 0.78),
+                  borderRadius: BorderRadius.circular(14),
                   border: Border.all(
-                    color: canFinish
-                        ? const Color(0xFF22C55E)
-                        : const Color(0xFFD4AF37).withValues(alpha: 0.65),
+                    color: !isAssisted
+                        ? const Color(0xFFEF4444)
+                        : canFinish
+                            ? const Color(0xFF22C55E)
+                            : const Color(0xFFD4AF37).withValues(alpha: 0.65),
                   ),
                 ),
                 child: Text(
-                  canFinish
-                      ? '✨ EL AÇMAYA HAZIR (0 CEZA)'
-                      : 'Elde Ceza: $deadwoodPoints Puan',
+                  !isAssisted
+                      ? '🔥 YARDIMSIZ MOD: Perleri 3 Sırada Dizin'
+                      : canFinish
+                          ? '✨ EL AÇMAYA HAZIR (0 CEZA)'
+                          : 'Elde Ceza: $deadwoodPoints Puan',
                   style: TextStyle(
-                    color: canFinish
-                        ? const Color(0xFF4ADE80)
-                        : const Color(0xFFFDE047),
+                    color: !isAssisted
+                        ? const Color(0xFFFCA5A5)
+                        : canFinish
+                            ? const Color(0xFF4ADE80)
+                            : const Color(0xFFFDE047),
                     fontWeight: FontWeight.w900,
-                    fontSize: 10.5,
+                    fontSize: 10,
                   ),
                 ),
               ),
-              const Text(
-                '↔ Parmağınızla Sürükleyerek Dizin',
+              Text(
+                _dragReadyToDiscardUp
+                    ? '🎯 YERE ATMAK İÇİN BIRAKIN!'
+                    : '↕ 3 Sıra Arasında Sürükleyin',
                 style: TextStyle(
-                  color: Colors.white60,
-                  fontSize: 10,
-                  fontWeight: FontWeight.w600,
+                  color: _dragReadyToDiscardUp
+                      ? const Color(0xFF4ADE80)
+                      : Colors.white70,
+                  fontSize: 9.5,
+                  fontWeight: FontWeight.w700,
                 ),
               ),
             ],
           ),
         ),
 
-        // TEK SIRA GENİŞ KAVİSLİ YELPAZE KARTLAR (60 FPS SÜRÜKLEME)
+        // 3 SIRALI DİKEY ISTAKA ALANI
         Expanded(
-          child: _localHand.isEmpty
+          child: _allLocalCards.isEmpty
               ? Center(
                   child: Text(
                     mySeatIdx == -1
@@ -1491,20 +1936,21 @@ class _TableScreenState extends State<TableScreen> {
                     style: const TextStyle(color: Colors.white60, fontSize: 13),
                   ),
                 )
-              : _buildSingleArcSmoothFanHand(
+              : _buildThreeRowInteractiveRack(
                   table: table,
                   meldedIds: meldedIds,
                   lastDrawnCardId: gs.lastDrawnCardId,
+                  isMyTurn: isMyTurn,
+                  hasDrawn: hasDrawn,
                 ),
         ),
 
-        // ZYNGA STİLİ 4'LÜ ALT AKSİYON BUTONLARI
-        // (DESTEDEN ÇEK | OTOMATİK DİZ | KAĞIDI AT | EL AÇ)
+        // 4'LÜ ALT AKSİYON BUTONLARI
         Padding(
-          padding: const EdgeInsets.fromLTRB(8, 2, 8, 6),
+          padding: const EdgeInsets.fromLTRB(8, 2, 8, 5),
           child: Row(
             children: [
-              // 1. DESTEDEN ÇEK (Altın Buton)
+              // 1. DESTEDEN ÇEK
               Expanded(
                 child: _buildZynga3DButton(
                   label: 'DESTEDEN\nÇEK',
@@ -1516,12 +1962,12 @@ class _TableScreenState extends State<TableScreen> {
               ),
               const SizedBox(width: 6),
 
-              // 2. OTOMATİK DİZ (Zümrüt Buton)
+              // 2. OTOMATİK DİZ / SIRALA
               Expanded(
                 child: _buildZynga3DButton(
-                  label: 'OTOMATİK\nDİZ',
+                  label: isAssisted ? 'OTOMATİK\nPER DİZ' : 'SAYIYA GÖRE\nSIRALA',
                   isGold: false,
-                  enabled: _localHand.isNotEmpty,
+                  enabled: _allLocalCards.isNotEmpty,
                   onTap: () {
                     SoundFx.playCardTap();
                     gs.reorderHand();
@@ -1530,7 +1976,7 @@ class _TableScreenState extends State<TableScreen> {
               ),
               const SizedBox(width: 6),
 
-              // 3. KAĞIDI AT (Altın Buton)
+              // 3. KAĞIDI AT
               Expanded(
                 child: _buildZynga3DButton(
                   label: 'KAĞIDI\nAT',
@@ -1545,32 +1991,26 @@ class _TableScreenState extends State<TableScreen> {
                       _selectedCardId != null,
                   onTap: () {
                     if (_selectedCardId != null) {
-                      final idToDiscard = _selectedCardId!;
-                      setState(() {
-                        _selectedCardId = null;
-                        _localHand.removeWhere((c) => c.id == idToDiscard);
-                      });
-                      gs.discardCard(idToDiscard);
+                      final card = _allLocalCards
+                          .cast<CardModel?>()
+                          .firstWhere((c) => c?.id == _selectedCardId, orElse: () => null);
+                      if (card != null) {
+                        _tryDiscardCardWithConfirmation(card, table);
+                      }
                     }
                   },
                 ),
               ),
               const SizedBox(width: 6),
 
-              // 4. EL AÇ (Zümrüt Parlak Buton)
+              // 4. EL AÇ / BİTİR
               Expanded(
                 child: _buildZynga3DButton(
                   label: 'EL AÇ\nBİTİR',
                   isGold: false,
                   enabled: isPlaying && isMyTurn && canFinish,
                   glow: isPlaying && isMyTurn && canFinish,
-                  onTap: () {
-                    gs.declareFinish(
-                      discardCardId:
-                          _selectedCardId ?? table.winningDiscardCardId,
-                    );
-                    setState(() => _selectedCardId = null);
-                  },
+                  onTap: () => _handleDeclareFinishTap(table),
                 ),
               ),
             ],
@@ -1580,165 +2020,157 @@ class _TableScreenState extends State<TableScreen> {
     );
   }
 
-  /// 60 FPS Sıfır Gecikmeli Tek Sıra Geniş Yelpaze Kart Dizilimi
-  Widget _buildSingleArcSmoothFanHand({
+  /// Dikey Ekranda 3 Sıralı (1. Sıra, 2. Sıra, 3. Sıra) Sürükle-Bırak Istaka
+  Widget _buildThreeRowInteractiveRack({
     required TableStateModel table,
     required Set<String> meldedIds,
     required String? lastDrawnCardId,
+    required bool isMyTurn,
+    required bool hasDrawn,
   }) {
     return LayoutBuilder(
       builder: (context, constraints) {
         final maxW = constraints.maxWidth;
         final maxH = constraints.maxHeight;
-        final count = _localHand.length;
-        if (count == 0) return const SizedBox.shrink();
-
-        // Kart boyutları: Dikey ekranda büyük ve çok net
-        final double cardH = (maxH * 0.80).clamp(112.0, 146.0);
-        final double cardW = (cardH * 0.69).clamp(76.0, 100.0);
-
-        // Tek sırada tüm ekran genişliğine yayılan yelpaze adımı
-        final double sideMargin = 10.0;
-        final double availableSpan = maxW - (sideMargin * 2) - cardW;
-        final double stepX = count > 1
-            ? (availableSpan / (count - 1)).clamp(24.0, cardW * 0.82)
-            : 0.0;
-        final double totalWidth = cardW + stepX * (count - 1);
-        final double startX = (maxW - totalWidth) / 2;
+        final rowH = (maxH / 3.0).clamp(68.0, 120.0);
+        final cardH = (rowH * 0.90).clamp(62.0, 108.0);
+        final cardW = (cardH * 0.70).clamp(44.0, 76.0);
 
         return GestureDetector(
           behavior: HitTestBehavior.translucent,
-          onHorizontalDragStart: (details) {
-            final localX = details.localPosition.dx;
-            // Dokunulan X koordinatına en yakın üstteki kartı bul
-            int hitIdx = -1;
-            for (int i = count - 1; i >= 0; i--) {
-              final left = startX + i * stepX;
-              if (localX >= left && localX <= left + cardW) {
-                hitIdx = i;
-                break;
-              }
-            }
-            hitIdx = hitIdx == -1
-                ? ((localX - startX) / (stepX > 0 ? stepX : 1))
-                    .round()
-                    .clamp(0, count - 1)
-                : hitIdx;
+          onPanStart: (details) {
+            final pos = details.localPosition;
+            final hit = _hitTestCardAtPosition(pos, maxW, rowH, cardW, cardH);
+            if (hit == null) return;
 
             SoundFx.playCardTap();
             setState(() {
-              _draggingCardId = _localHand[hitIdx].id;
-              _selectedCardId = _draggingCardId;
-              _dragFingerX = localX;
+              _draggingCardId = hit.id;
+              _selectedCardId = hit.id;
+              _dragLocalPos = pos;
+              _dragReadyToDiscardUp = false;
             });
           },
-          onHorizontalDragUpdate: (details) {
+          onPanUpdate: (details) {
             if (_draggingCardId == null) return;
-            final fingerX = details.localPosition.dx.clamp(0.0, maxW);
-            final currentIdx =
-                _localHand.indexWhere((c) => c.id == _draggingCardId);
-            if (currentIdx == -1) return;
+            final pos = details.localPosition;
+            final canDiscardUp =
+                table.status == 'playing' && isMyTurn && hasDrawn && pos.dy < -18;
 
-            final targetIdx = stepX > 0
-                ? ((fingerX - startX - cardW * 0.35) / stepX)
-                    .round()
-                    .clamp(0, count - 1)
-                : 0;
+            final targetRow = (pos.dy / rowH).floor().clamp(0, 2);
+            _moveDraggedCardToRowSlot(
+              _draggingCardId!,
+              targetRow,
+              pos.dx,
+              maxW,
+              cardW,
+            );
 
             setState(() {
-              _dragFingerX = fingerX;
-              if (targetIdx != currentIdx) {
-                final moved = _localHand.removeAt(currentIdx);
-                _localHand.insert(targetIdx, moved);
-                HapticFeedback.selectionClick();
-              }
+              _dragLocalPos = pos;
+              _dragReadyToDiscardUp = canDiscardUp;
             });
           },
-          onHorizontalDragEnd: (_) {
+          onPanEnd: (_) {
             if (_draggingCardId == null) return;
-            final orderedIds = _localHand.map((c) => c.id).toList();
+            final draggedId = _draggingCardId!;
+            final shouldDiscard = _dragReadyToDiscardUp &&
+                table.status == 'playing' &&
+                isMyTurn &&
+                hasDrawn;
+
             setState(() {
               _draggingCardId = null;
+              _dragReadyToDiscardUp = false;
             });
-            // Sadece parmak kalktığında sunucuya tek paket gönderilir -> 0 gecikme!
-            GameService.instance.reorderHand(orderedCardIds: orderedIds);
+
+            if (shouldDiscard) {
+              final card = _allLocalCards
+                  .cast<CardModel?>()
+                  .firstWhere((c) => c?.id == draggedId, orElse: () => null);
+              if (card != null) {
+                _tryDiscardCardWithConfirmation(card, table);
+                return;
+              }
+            }
+
+            GameService.instance.reorderHand(
+              orderedCardIds: _allLocalCards.map((c) => c.id).toList(),
+              rowCardIds: _currentRowIds,
+            );
           },
           child: SizedBox(
             width: maxW,
             height: maxH,
             child: Stack(
               clipBehavior: Clip.none,
-              children: List.generate(count, (idx) {
-                final card = _localHand[idx];
-                final cardId = card.id;
-                final isDragging = _draggingCardId == cardId;
-                final isSelected = _selectedCardId == cardId;
-                final isMelded = meldedIds.contains(cardId);
-                final isNewlyDrawn = lastDrawnCardId == cardId;
-                final isWinningDiscard = table.winningDiscardCardId == cardId;
-
-                // Zynga tarzı yumuşak kavisli yelpaze açısı ve yüksekliği
-                final double norm =
-                    count > 1 ? (idx / (count - 1)) - 0.5 : 0.0; // -0.5 .. +0.5
-                final double angle = isDragging ? 0.0 : norm * 0.28;
-                final double curveY = (norm * norm) * 28.0;
-
-                final double targetLeft = isDragging
-                    ? (_dragFingerX - cardW / 2).clamp(2.0, maxW - cardW - 2.0)
-                    : startX + (idx * stepX);
-                final double targetTop =
-                    (maxH - cardH - 12) + curveY - (isSelected ? 18 : 0);
-
-                return AnimatedPositioned(
-                  key: ValueKey(cardId),
-                  duration: Duration(milliseconds: isDragging ? 0 : 120),
-                  curve: Curves.easeOutCubic,
-                  left: targetLeft,
-                  top: targetTop,
-                  child: GestureDetector(
-                    onTap: () {
-                      SoundFx.playCardTap();
-                      setState(() {
-                        if (_selectedCardId == cardId) {
-                          // Seçili karta tekrar dokunulursa ve sıra bizdeyse doğrudan at!
-                          if (table.status == 'playing' &&
-                              table.currentTurnSeat ==
-                                  table.seats.indexWhere(
-                                    (s) =>
-                                        s?.userId ==
-                                        GameService.instance.currentUser?.id,
-                                  ) &&
-                              table.hasDrawnThisTurn) {
-                            _selectedCardId = null;
-                            _localHand.removeWhere((c) => c.id == cardId);
-                            GameService.instance.discardCard(cardId);
-                          } else {
-                            _selectedCardId = null;
-                          }
-                        } else {
-                          _selectedCardId = cardId;
+              children: [
+                // 3 SIRANIN AHŞAP/ALTIN RAF ÇİZGİLERİ VE SIRA NUMARALARI
+                for (int r = 0; r < 3; r++)
+                  Positioned(
+                    left: 8,
+                    right: 8,
+                    top: r * rowH + 2,
+                    height: rowH - 4,
+                    child: GestureDetector(
+                      onTap: () {
+                        // Seçili bir kart varsa ve kullanıcı başka bir sıranın boşluğuna dokunursa o sıraya taşı!
+                        if (_selectedCardId != null) {
+                          _moveCardToRowEnd(_selectedCardId!, r);
                         }
-                      });
-                    },
-                    child: Transform.rotate(
-                      angle: angle,
-                      child: Transform.scale(
-                        scale: isDragging ? 1.08 : 1.0,
-                        child: PlayingCardWidget(
-                          card: card,
-                          wildRank: table.wildRank,
-                          width: cardW,
-                          height: cardH,
-                          isSelected: isSelected || isDragging,
-                          isMelded: isMelded,
-                          isNewlyDrawn: isNewlyDrawn,
-                          isWinningDiscardCandidate: isWinningDiscard,
+                      },
+                      child: Container(
+                        decoration: BoxDecoration(
+                          gradient: LinearGradient(
+                            begin: Alignment.topCenter,
+                            end: Alignment.bottomCenter,
+                            colors: [
+                              const Color(0xFF0A261A).withValues(alpha: 0.55),
+                              const Color(0xFF1F120B).withValues(alpha: 0.78),
+                            ],
+                          ),
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(
+                            color: const Color(0xFFD4AF37).withValues(alpha: 0.42),
+                            width: 1.1,
+                          ),
+                        ),
+                        child: Align(
+                          alignment: Alignment.centerLeft,
+                          child: Padding(
+                            padding: const EdgeInsets.only(left: 7),
+                            child: Text(
+                              '${r + 1}.\nSIRA',
+                              textAlign: TextAlign.center,
+                              style: TextStyle(
+                                color: const Color(0xFFD4AF37)
+                                    .withValues(alpha: 0.45),
+                                fontWeight: FontWeight.w900,
+                                fontSize: 8.5,
+                              ),
+                            ),
+                          ),
                         ),
                       ),
                     ),
                   ),
-                );
-              }),
+
+                // HER SIRADAKİ KARTLARI YERLEŞTİR
+                for (int r = 0; r < 3; r++)
+                  ..._buildRowCardsWidgets(
+                    rowIdx: r,
+                    rowCards: _localRows[r],
+                    maxW: maxW,
+                    rowH: rowH,
+                    cardW: cardW,
+                    cardH: cardH,
+                    table: table,
+                    meldedIds: meldedIds,
+                    lastDrawnCardId: lastDrawnCardId,
+                    isMyTurn: isMyTurn,
+                    hasDrawn: hasDrawn,
+                  ),
+              ],
             ),
           ),
         );
@@ -1746,7 +2178,190 @@ class _TableScreenState extends State<TableScreen> {
     );
   }
 
-  /// Zynga UI Mockup'ındaki 3D Altın ve Zümrüt Çerçeveli Aksiyon Butonları
+  List<Widget> _buildRowCardsWidgets({
+    required int rowIdx,
+    required List<CardModel> rowCards,
+    required double maxW,
+    required double rowH,
+    required double cardW,
+    required double cardH,
+    required TableStateModel table,
+    required Set<String> meldedIds,
+    required String? lastDrawnCardId,
+    required bool isMyTurn,
+    required bool hasDrawn,
+  }) {
+    final count = rowCards.length;
+    if (count == 0) return const [];
+
+    final double leftPadding = 34.0;
+    final double rightPadding = 14.0;
+    final double usableW = maxW - leftPadding - rightPadding;
+    final double stepX = count > 1
+        ? ((usableW - cardW) / (count - 1)).clamp(26.0, cardW + 8.0)
+        : 0.0;
+    final double totalRowW = cardW + stepX * (count - 1);
+    final double startX =
+        leftPadding + ((usableW - totalRowW) / 2).clamp(0.0, usableW);
+    final double baseTop = rowIdx * rowH + (rowH - cardH) / 2;
+
+    return List.generate(count, (idx) {
+      final card = rowCards[idx];
+      final cardId = card.id;
+      final isDragging = _draggingCardId == cardId;
+      final isSelected = _selectedCardId == cardId;
+      final isMelded = meldedIds.contains(cardId);
+      final isNewlyDrawn = lastDrawnCardId == cardId;
+      final isWinningDiscard =
+          table.isAssisted && table.winningDiscardCardId == cardId;
+
+      final double left = isDragging
+          ? (_dragLocalPos.dx - cardW / 2).clamp(4.0, maxW - cardW - 4.0)
+          : startX + idx * stepX;
+      final double top = isDragging
+          ? (_dragLocalPos.dy - cardH / 2).clamp(-40.0, rowH * 3 - cardH)
+          : baseTop - (isSelected ? 7.0 : 0.0);
+
+      return AnimatedPositioned(
+        key: ValueKey(cardId),
+        duration: Duration(milliseconds: isDragging ? 0 : 120),
+        curve: Curves.easeOutCubic,
+        left: left,
+        top: top,
+        child: GestureDetector(
+          onTap: () {
+            SoundFx.playCardTap();
+            if (_selectedCardId == cardId) {
+              if (table.status == 'playing' && isMyTurn && hasDrawn) {
+                _tryDiscardCardWithConfirmation(card, table);
+              } else {
+                setState(() => _selectedCardId = null);
+              }
+            } else {
+              setState(() => _selectedCardId = cardId);
+            }
+          },
+          child: Transform.scale(
+            scale: isDragging ? 1.08 : 1.0,
+            child: PlayingCardWidget(
+              card: card,
+              wildRank: table.wildRank,
+              width: cardW,
+              height: cardH,
+              isSelected: isSelected || isDragging,
+              isMelded: isMelded,
+              isNewlyDrawn: isNewlyDrawn,
+              isWinningDiscardCandidate: isWinningDiscard,
+            ),
+          ),
+        ),
+      );
+    });
+  }
+
+  CardModel? _hitTestCardAtPosition(
+    Offset pos,
+    double maxW,
+    double rowH,
+    double cardW,
+    double cardH,
+  ) {
+    final int r = (pos.dy / rowH).floor().clamp(0, 2);
+    final rowCards = _localRows[r];
+    if (rowCards.isEmpty) return null;
+
+    final count = rowCards.length;
+    const double leftPadding = 34.0;
+    const double rightPadding = 14.0;
+    final double usableW = maxW - leftPadding - rightPadding;
+    final double stepX = count > 1
+        ? ((usableW - cardW) / (count - 1)).clamp(26.0, cardW + 8.0)
+        : 0.0;
+    final double totalRowW = cardW + stepX * (count - 1);
+    final double startX =
+        leftPadding + ((usableW - totalRowW) / 2).clamp(0.0, usableW);
+
+    for (int i = count - 1; i >= 0; i--) {
+      final left = startX + i * stepX;
+      if (pos.dx >= left && pos.dx <= left + cardW) {
+        return rowCards[i];
+      }
+    }
+
+    final approxIdx = stepX > 0
+        ? ((pos.dx - startX) / stepX).round().clamp(0, count - 1)
+        : 0;
+    return rowCards[approxIdx];
+  }
+
+  void _moveDraggedCardToRowSlot(
+    String cardId,
+    int targetRow,
+    double fingerX,
+    double maxW,
+    double cardW,
+  ) {
+    CardModel? movingCard;
+    int fromRow = -1;
+    int fromIdx = -1;
+
+    for (int r = 0; r < 3; r++) {
+      final idx = _localRows[r].indexWhere((c) => c.id == cardId);
+      if (idx != -1) {
+        fromRow = r;
+        fromIdx = idx;
+        movingCard = _localRows[r][idx];
+        break;
+      }
+    }
+    if (movingCard == null) return;
+
+    final destRowList = _localRows[targetRow];
+    final countAfter =
+        fromRow == targetRow ? destRowList.length : destRowList.length + 1;
+    const double leftPadding = 34.0;
+    const double rightPadding = 14.0;
+    final double usableW = maxW - leftPadding - rightPadding;
+    final double stepX = countAfter > 1
+        ? ((usableW - cardW) / (countAfter - 1)).clamp(26.0, cardW + 8.0)
+        : 0.0;
+    final double totalRowW = cardW + stepX * (countAfter - 1);
+    final double startX =
+        leftPadding + ((usableW - totalRowW) / 2).clamp(0.0, usableW);
+
+    final int targetIdx = stepX > 0
+        ? ((fingerX - startX - cardW * 0.35) / stepX)
+            .round()
+            .clamp(0, countAfter - 1)
+        : 0;
+
+    if (fromRow == targetRow && fromIdx == targetIdx) return;
+
+    _localRows[fromRow].removeAt(fromIdx);
+    final clampedInsert = targetIdx.clamp(0, _localRows[targetRow].length);
+    _localRows[targetRow].insert(clampedInsert, movingCard);
+    HapticFeedback.selectionClick();
+  }
+
+  void _moveCardToRowEnd(String cardId, int targetRow) {
+    CardModel? movingCard;
+    for (int r = 0; r < 3; r++) {
+      final idx = _localRows[r].indexWhere((c) => c.id == cardId);
+      if (idx != -1) {
+        movingCard = _localRows[r].removeAt(idx);
+        break;
+      }
+    }
+    if (movingCard == null) return;
+    setState(() {
+      _localRows[targetRow].add(movingCard!);
+    });
+    GameService.instance.reorderHand(
+      orderedCardIds: _allLocalCards.map((c) => c.id).toList(),
+      rowCardIds: _currentRowIds,
+    );
+  }
+
   Widget _buildZynga3DButton({
     required String label,
     required bool isGold,
@@ -1772,7 +2387,7 @@ class _TableScreenState extends State<TableScreen> {
       onTap: enabled ? onTap : null,
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 180),
-        height: 46,
+        height: 44,
         decoration: BoxDecoration(
           gradient: LinearGradient(
             begin: Alignment.topCenter,
@@ -1812,7 +2427,7 @@ class _TableScreenState extends State<TableScreen> {
                       ? const Color(0xFF1C1917)
                       : Colors.white,
               fontWeight: FontWeight.w900,
-              fontSize: 11,
+              fontSize: 10.5,
               height: 1.1,
               letterSpacing: 0.3,
             ),
@@ -1823,7 +2438,477 @@ class _TableScreenState extends State<TableScreen> {
   }
 
   // ===========================================================================
-  // 4. PROFESYONEL 101 PUAN TABLOSU & YENİDEN GİRİŞ (RE-BUY) MODALI
+  // 4. ŞEFFAF ANİMASYONLU EL SONU GÖSTERİMİ (10 SN AÇAN EL + SAAT YÖNÜNDE CEZA AÇILIŞI)
+  // ===========================================================================
+  Widget _buildAnimatedShowdownStage(
+    TableStateModel table,
+    SeatPlayerModel? mySeat,
+    int mySeatIdx,
+  ) {
+    final gs = GameService.instance;
+    final showdown = table.lastShowdown;
+    if (showdown.isEmpty) return const SizedBox.shrink();
+
+    final opener = showdown.first;
+    final hasLeadShowcase = opener.isFinisher || opener.isFalseDeclarer;
+    final isStage1OpenerShowcase =
+        hasLeadShowcase && _showdownElapsedMs < 10000;
+    final stage1RemainingSec =
+        ((10000 - _showdownElapsedMs) / 1000).ceil().clamp(0, 10);
+
+    final myShowdown = mySeat != null
+        ? showdown
+            .cast<ShowdownPlayerResultModel?>()
+            .firstWhere((s) => s?.userId == mySeat.userId, orElse: () => null)
+        : null;
+
+    return Positioned.fill(
+      child: Container(
+        color: Colors.black.withValues(alpha: 0.86),
+        padding: const EdgeInsets.fromLTRB(12, 24, 12, 16),
+        child: SafeArea(
+          child: Column(
+            children: [
+              // ÜST BAŞLIK & AŞAMA GÖSTERGESİ
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    colors: opener.isFalseDeclarer
+                        ? const [Color(0xFF991B1B), Color(0xFF450A0A)]
+                        : const [Color(0xFF065F46), Color(0xFF064E3B)],
+                  ),
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(color: const Color(0xFFFDE047), width: 1.6),
+                ),
+                child: Row(
+                  children: [
+                    Text(
+                      opener.isFalseDeclarer ? '🚨' : '👑',
+                      style: const TextStyle(fontSize: 22),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            isStage1OpenerShowcase
+                                ? (opener.isFalseDeclarer
+                                    ? '${opener.username} HATALI EL AÇTI! ($stage1RemainingSec sn)'
+                                    : '${opener.username} EL AÇTI! ($stage1RemainingSec sn Masada Açık)')
+                                : '🔄 SAAT YÖNÜNDE CEZA PUANLARI AÇILIYOR (${table.turnRemainingSeconds}s)',
+                            style: const TextStyle(
+                              color: Color(0xFFFDE047),
+                              fontWeight: FontWeight.w900,
+                              fontSize: 13,
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            isStage1OpenerShowcase
+                                ? 'Açılan el 10 saniye boyunca masadaki tüm oyunculara şeffaf gösterilir.'
+                                : 'Kalan oyuncuların elleri saat yönünde sırayla açılıp cezaları toplama ekleniyor.',
+                            style: const TextStyle(
+                              color: Colors.white70,
+                              fontSize: 10.5,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    TextButton.icon(
+                      onPressed: () =>
+                          setState(() => _showScoreboardModal = true),
+                      icon: const Icon(
+                        Icons.table_chart_outlined,
+                        color: Color(0xFFFDE047),
+                        size: 16,
+                      ),
+                      label: const Text(
+                        'Tablo',
+                        style: TextStyle(
+                          color: Color(0xFFFDE047),
+                          fontWeight: FontWeight.bold,
+                          fontSize: 11,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 10),
+
+              // 1. AÇAN OYUNCUNUN MASADAKİ 10 KAĞITLIK VİTRİNİ (Her zaman en üstte büyük ve net)
+              if (hasLeadShowcase)
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    gradient: const LinearGradient(
+                      colors: [Color(0xFF144530), Color(0xFF092318)],
+                    ),
+                    borderRadius: BorderRadius.circular(18),
+                    border: Border.all(
+                      color: opener.isFalseDeclarer
+                          ? Colors.redAccent
+                          : const Color(0xFFFACC15),
+                      width: 2,
+                    ),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Text(
+                            opener.isFalseDeclarer
+                                ? '🚨 ${opener.username} — Hatalı Açılan El (Direkt Yandı & Re-buy İptal!)'
+                                : '✨ ${opener.username} — Açılan El (0 Ceza Puanı)',
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontWeight: FontWeight.w900,
+                              fontSize: 12.5,
+                            ),
+                          ),
+                          if (isStage1OpenerShowcase)
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 8,
+                                vertical: 2,
+                              ),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFFFACC15),
+                                borderRadius: BorderRadius.circular(10),
+                              ),
+                              child: Text(
+                                '$stage1RemainingSec sn',
+                                style: const TextStyle(
+                                  color: Colors.black,
+                                  fontWeight: FontWeight.w900,
+                                  fontSize: 11,
+                                ),
+                              ),
+                            ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      SingleChildScrollView(
+                        scrollDirection: Axis.horizontal,
+                        child: Row(
+                          children: [
+                            for (final meld in opener.melds) ...[
+                              Container(
+                                margin: const EdgeInsets.only(right: 10),
+                                padding: const EdgeInsets.all(5),
+                                decoration: BoxDecoration(
+                                  color: Colors.black38,
+                                  borderRadius: BorderRadius.circular(10),
+                                  border: Border.all(
+                                    color: const Color(0xFF22C55E),
+                                  ),
+                                ),
+                                child: Row(
+                                  children: meld
+                                      .map(
+                                        (c) => Padding(
+                                          padding: const EdgeInsets.symmetric(
+                                            horizontal: 1.5,
+                                          ),
+                                          child: PlayingCardWidget(
+                                            card: c,
+                                            wildRank: table.wildRank,
+                                            width: 46,
+                                            height: 66,
+                                            isMelded: true,
+                                          ),
+                                        ),
+                                      )
+                                      .toList(),
+                                ),
+                              ),
+                            ],
+                            if (opener.unmelded.isNotEmpty)
+                              Container(
+                                padding: const EdgeInsets.all(5),
+                                decoration: BoxDecoration(
+                                  color: Colors.red.shade900.withValues(alpha: 0.45),
+                                  borderRadius: BorderRadius.circular(10),
+                                  border: Border.all(color: Colors.redAccent),
+                                ),
+                                child: Row(
+                                  children: opener.unmelded
+                                      .map(
+                                        (c) => Padding(
+                                          padding: const EdgeInsets.symmetric(
+                                            horizontal: 1.5,
+                                          ),
+                                          child: PlayingCardWidget(
+                                            card: c,
+                                            wildRank: table.wildRank,
+                                            width: 46,
+                                            height: 66,
+                                          ),
+                                        ),
+                                      )
+                                      .toList(),
+                                ),
+                              ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+
+              const SizedBox(height: 10),
+
+              // 2. SAAT YÖNÜNDE SIRAYLA AÇILAN DİĞER OYUNCULARIN ELLERİ VE CEZA PUANLARI
+              Expanded(
+                child: ListView.builder(
+                  itemCount: showdown.length,
+                  itemBuilder: (context, idx) {
+                    if (hasLeadShowcase && idx == 0) {
+                      return const SizedBox.shrink();
+                    }
+                    final sd = showdown[idx];
+                    final isRevealedYet =
+                        _showdownElapsedMs >= sd.revealStartMs;
+                    final isCurrentlyRevealing = isRevealedYet &&
+                        _showdownElapsedMs <
+                            (sd.revealStartMs + sd.revealDurationMs);
+
+                    return AnimatedOpacity(
+                      duration: const Duration(milliseconds: 450),
+                      opacity: isRevealedYet ? 1.0 : 0.32,
+                      child: Container(
+                        margin: const EdgeInsets.only(bottom: 10),
+                        padding: const EdgeInsets.all(11),
+                        decoration: BoxDecoration(
+                          color: isCurrentlyRevealing
+                              ? const Color(0xFF1A3A2A)
+                              : const Color(0xFF0A2016),
+                          borderRadius: BorderRadius.circular(14),
+                          border: Border.all(
+                            color: isCurrentlyRevealing
+                                ? const Color(0xFFFACC15)
+                                : sd.burnedThisRound
+                                    ? Colors.redAccent
+                                    : Colors.white24,
+                            width: isCurrentlyRevealing ? 2.0 : 1.0,
+                          ),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                Row(
+                                  children: [
+                                    Text(
+                                      '🪑 Koltuk #${sd.seatIndex + 1} • ${sd.username}',
+                                      style: const TextStyle(
+                                        color: Colors.white,
+                                        fontWeight: FontWeight.w900,
+                                        fontSize: 12.5,
+                                      ),
+                                    ),
+                                    if (isCurrentlyRevealing) ...[
+                                      const SizedBox(width: 6),
+                                      Container(
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 6,
+                                          vertical: 2,
+                                        ),
+                                        decoration: BoxDecoration(
+                                          color: const Color(0xFFFACC15),
+                                          borderRadius:
+                                              BorderRadius.circular(6),
+                                        ),
+                                        child: const Text(
+                                          'AÇILIYOR',
+                                          style: TextStyle(
+                                            color: Colors.black,
+                                            fontWeight: FontWeight.w900,
+                                            fontSize: 9,
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                  ],
+                                ),
+                                if (isRevealedYet)
+                                  TweenAnimationBuilder<double>(
+                                    tween: Tween(
+                                      begin: 0,
+                                      end: sd.roundPenalty.toDouble(),
+                                    ),
+                                    duration: const Duration(milliseconds: 900),
+                                    builder: (context, val, _) {
+                                      final animPen = val.round();
+                                      final animTot =
+                                          sd.previousScore + animPen;
+                                      return Text(
+                                        '+$animPen Ceza  ➔  Toplam: $animTot/101 ${sd.burnedThisRound ? "🔥 YANDI" : ""}',
+                                        style: TextStyle(
+                                          color: sd.burnedThisRound
+                                              ? Colors.redAccent
+                                              : const Color(0xFFFDE047),
+                                          fontWeight: FontWeight.w900,
+                                          fontSize: 11.5,
+                                        ),
+                                      );
+                                    },
+                                  )
+                                else
+                                  const Text(
+                                    '⏳ Sırası Bekleniyor...',
+                                    style: TextStyle(
+                                      color: Colors.white54,
+                                      fontSize: 11,
+                                    ),
+                                  ),
+                              ],
+                            ),
+                            const SizedBox(height: 6),
+                            if (isRevealedYet)
+                              SingleChildScrollView(
+                                scrollDirection: Axis.horizontal,
+                                child: Row(
+                                  children: [
+                                    if (sd.unmelded.isNotEmpty)
+                                      Container(
+                                        margin:
+                                            const EdgeInsets.only(right: 8),
+                                        padding: const EdgeInsets.all(4),
+                                        decoration: BoxDecoration(
+                                          color: Colors.red.shade900
+                                              .withValues(alpha: 0.35),
+                                          borderRadius:
+                                              BorderRadius.circular(8),
+                                          border: Border.all(
+                                            color: Colors.redAccent,
+                                          ),
+                                        ),
+                                        child: Row(
+                                          children: sd.unmelded
+                                              .map(
+                                                (c) => Padding(
+                                                  padding: const EdgeInsets
+                                                      .symmetric(
+                                                    horizontal: 1.5,
+                                                  ),
+                                                  child: PlayingCardWidget(
+                                                    card: c,
+                                                    wildRank: table.wildRank,
+                                                    width: 40,
+                                                    height: 58,
+                                                  ),
+                                                ),
+                                              )
+                                              .toList(),
+                                        ),
+                                      ),
+                                    for (final meld in sd.melds)
+                                      Container(
+                                        margin:
+                                            const EdgeInsets.only(right: 8),
+                                        padding: const EdgeInsets.all(4),
+                                        decoration: BoxDecoration(
+                                          color: Colors.black26,
+                                          borderRadius:
+                                              BorderRadius.circular(8),
+                                          border: Border.all(
+                                            color: const Color(0xFF22C55E)
+                                                .withValues(alpha: 0.6),
+                                          ),
+                                        ),
+                                        child: Row(
+                                          children: meld
+                                              .map(
+                                                (c) => Padding(
+                                                  padding: const EdgeInsets
+                                                      .symmetric(
+                                                    horizontal: 1.5,
+                                                  ),
+                                                  child: PlayingCardWidget(
+                                                    card: c,
+                                                    wildRank: table.wildRank,
+                                                    width: 40,
+                                                    height: 58,
+                                                    isMelded: true,
+                                                  ),
+                                                ),
+                                              )
+                                              .toList(),
+                                        ),
+                                      ),
+                                  ],
+                                ),
+                              ),
+                          ],
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              ),
+
+              // 3. YANAN OYUNCU İÇİN RE-BUY BUTONU VEYA HATALI EL AÇMA CEZASI UYARISI
+              if (myShowdown != null && myShowdown.forfeitedRebuy)
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: Colors.red.shade900.withValues(alpha: 0.7),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: Colors.redAccent),
+                  ),
+                  child: const Text(
+                    '🚫 Yardımsız modda hatalı el açtığınız için direkt elendiniz ve bu oyunda yeniden giriş (Re-buy) hakkınızı kaybettiniz.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.bold,
+                      fontSize: 11.5,
+                    ),
+                  ),
+                )
+              else if (myShowdown != null && myShowdown.canRebuy)
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton.icon(
+                    onPressed: () => gs.rebuyIntoMatch(),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFFF59E0B),
+                      foregroundColor: Colors.black,
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(14),
+                      ),
+                    ),
+                    icon: const Icon(Icons.replay_circle_filled),
+                    label: Text(
+                      'OYUNA TEKRAR DAHİL OL (${myShowdown.rebuyMultiplier}x = ${myShowdown.rebuyCost} Kredi • ${myShowdown.rebuyTargetScore} Puanla)',
+                      style: const TextStyle(
+                        fontWeight: FontWeight.w900,
+                        fontSize: 11.5,
+                      ),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  // ===========================================================================
+  // 5. PROFESYONEL 101 PUAN TABLOSU & YENİDEN GİRİŞ (RE-BUY) MODALI
   // ===========================================================================
   Widget _buildScoreboardOverlay(
     TableStateModel table,
@@ -1840,7 +2925,7 @@ class _TableScreenState extends State<TableScreen> {
 
     return Positioned.fill(
       child: Container(
-        color: Colors.black.withValues(alpha: 0.82),
+        color: Colors.black.withValues(alpha: 0.84),
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 28),
         child: Center(
           child: Container(
@@ -1871,7 +2956,7 @@ class _TableScreenState extends State<TableScreen> {
                     Expanded(
                       child: Text(
                         isRoundEnd
-                            ? 'EL #${table.roundNumber} SONUCU (${table.turnRemainingSeconds}s)'
+                            ? 'EL #${table.roundNumber} PUAN TABLOSU (${table.turnRemainingSeconds}s)'
                             : '101 CEZA PUAN ÇİZELGESİ',
                         style: const TextStyle(
                           color: Colors.white,
@@ -1880,77 +2965,14 @@ class _TableScreenState extends State<TableScreen> {
                         ),
                       ),
                     ),
-                    if (!isRoundEnd)
-                      IconButton(
-                        onPressed: () =>
-                            setState(() => _showScoreboardModal = false),
-                        icon: const Icon(Icons.close, color: Colors.white70),
-                      ),
+                    IconButton(
+                      onPressed: () =>
+                          setState(() => _showScoreboardModal = false),
+                      icon: const Icon(Icons.close, color: Colors.white70),
+                    ),
                   ],
                 ),
                 const Divider(color: Colors.white12),
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 10,
-                    vertical: 7,
-                  ),
-                  decoration: BoxDecoration(
-                    color: Colors.white.withValues(alpha: 0.06),
-                    borderRadius: BorderRadius.circular(10),
-                  ),
-                  child: const Row(
-                    children: [
-                      Expanded(
-                        flex: 4,
-                        child: Text(
-                          'OYUNCU',
-                          style: TextStyle(
-                            color: Colors.white60,
-                            fontWeight: FontWeight.bold,
-                            fontSize: 11,
-                          ),
-                        ),
-                      ),
-                      Expanded(
-                        flex: 2,
-                        child: Text(
-                          'SON EL',
-                          textAlign: TextAlign.center,
-                          style: TextStyle(
-                            color: Colors.white60,
-                            fontWeight: FontWeight.bold,
-                            fontSize: 11,
-                          ),
-                        ),
-                      ),
-                      Expanded(
-                        flex: 2,
-                        child: Text(
-                          'TOPLAM',
-                          textAlign: TextAlign.center,
-                          style: TextStyle(
-                            color: Colors.white60,
-                            fontWeight: FontWeight.bold,
-                            fontSize: 11,
-                          ),
-                        ),
-                      ),
-                      Expanded(
-                        flex: 3,
-                        child: Text(
-                          'DURUM',
-                          textAlign: TextAlign.end,
-                          style: TextStyle(
-                            color: Colors.white60,
-                            fontWeight: FontWeight.bold,
-                            fontSize: 11,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                const SizedBox(height: 6),
                 Flexible(
                   child: ListView.separated(
                     shrinkWrap: true,
@@ -1991,7 +3013,15 @@ class _TableScreenState extends State<TableScreen> {
                                       fontSize: 13,
                                     ),
                                   ),
-                                  if (rebuyCount > 0)
+                                  if (s.forfeitedRebuy)
+                                    const Text(
+                                      '🚫 Hatalı El Açtı (Re-buy İptal)',
+                                      style: TextStyle(
+                                        color: Colors.redAccent,
+                                        fontSize: 10,
+                                      ),
+                                    )
+                                  else if (rebuyCount > 0)
                                     Text(
                                       '🔄 $rebuyCount kez yeniden girdi',
                                       style: const TextStyle(
@@ -2078,7 +3108,8 @@ class _TableScreenState extends State<TableScreen> {
                 if (isRoundEnd &&
                     mySeat != null &&
                     myShowdown != null &&
-                    myShowdown.canRebuy) ...[
+                    myShowdown.canRebuy &&
+                    !myShowdown.forfeitedRebuy) ...[
                   const SizedBox(height: 12),
                   SizedBox(
                     width: double.infinity,
@@ -2109,7 +3140,7 @@ class _TableScreenState extends State<TableScreen> {
   }
 
   // ===========================================================================
-  // 5. MAÇ SONU ŞAMPİYON OVERLAY
+  // 6. MAÇ SONU ŞAMPİYON OVERLAY
   // ===========================================================================
   Widget _buildMatchFinishedOverlay(
     TableStateModel table,
@@ -2241,7 +3272,7 @@ class _TableScreenState extends State<TableScreen> {
   }
 
   // ===========================================================================
-  // 6. EFEKT GÖNDERME VE SOHBET ÇEKMECESİ
+  // 7. EFEKT GÖNDERME VE SOHBET ÇEKMECESİ (+ HIZLI SOHBET KALIPLARI)
   // ===========================================================================
   void _showEffectPickerDialog(String targetUserId, String targetName) {
     final cost = GameService.instance.emojiCost;
@@ -2343,24 +3374,33 @@ class _TableScreenState extends State<TableScreen> {
     final key = eff['effectKey']?.toString() ?? '';
     final emoji = emojiMap[key] ?? '✨';
     return Positioned(
-      top: 130,
-      left: 30,
-      right: 30,
+      top: 128,
+      left: 24,
+      right: 24,
       child: IgnorePointer(
-        child: Center(
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
-            decoration: BoxDecoration(
-              color: Colors.black.withValues(alpha: 0.85),
-              borderRadius: BorderRadius.circular(30),
-              border: Border.all(color: const Color(0xFFF59E0B)),
-            ),
-            child: Text(
-              '$emoji  ${eff['senderUsername'] ?? eff['fromUsername']} ➔ ${eff['effectName'] ?? ''}',
-              style: const TextStyle(
-                color: Colors.white,
-                fontWeight: FontWeight.bold,
-                fontSize: 13,
+        child: TweenAnimationBuilder<double>(
+          tween: Tween(begin: 0.0, end: 1.0),
+          duration: const Duration(milliseconds: 550),
+          curve: Curves.elasticOut,
+          builder: (context, val, _) => Transform.scale(
+            scale: val,
+            child: Center(
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
+                decoration: BoxDecoration(
+                  color: Colors.black.withValues(alpha: 0.88),
+                  borderRadius: BorderRadius.circular(30),
+                  border: Border.all(color: const Color(0xFFF59E0B), width: 1.5),
+                ),
+                child: Text(
+                  '$emoji  ${eff['senderUsername'] ?? ''} ➔ ${eff['effectName'] ?? ''}',
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.bold,
+                    fontSize: 13,
+                  ),
+                ),
               ),
             ),
           ),
@@ -2370,11 +3410,19 @@ class _TableScreenState extends State<TableScreen> {
   }
 
   Widget _buildChatDrawer(GameService gs) {
+    const quickPhrases = [
+      'İyi oyunlar! 👋',
+      'Bol şans! 🍀',
+      'Hızlı oynayalım ⏱️',
+      'Güzel eldi! 👏',
+      'Eyvah yandık! 🔥',
+    ];
+
     return Positioned(
       right: 0,
       top: 0,
       bottom: 0,
-      width: 290,
+      width: 295,
       child: Material(
         color: const Color(0xFF071B12).withValues(alpha: 0.98),
         elevation: 16,
@@ -2397,27 +3445,51 @@ class _TableScreenState extends State<TableScreen> {
                       ),
                     ),
                     IconButton(
-                      onPressed: () =>
-                          setState(() => _showChatDrawer = false),
+                      onPressed: () => setState(() => _showChatDrawer = false),
                       icon: const Icon(Icons.close, color: Colors.white70),
                     ),
                   ],
                 ),
               ),
-              const Divider(color: Colors.white12, height: 1),
+              // Hızlı Sohbet Kalıpları
+              SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                padding: const EdgeInsets.symmetric(horizontal: 10),
+                child: Row(
+                  children: quickPhrases.map((phrase) {
+                    return Padding(
+                      padding: const EdgeInsets.only(right: 6),
+                      child: ActionChip(
+                        backgroundColor: const Color(0xFF143D2B),
+                        label: Text(
+                          phrase,
+                          style: const TextStyle(
+                            color: Color(0xFFFDE047),
+                            fontSize: 11,
+                          ),
+                        ),
+                        onPressed: () {
+                          gs.sendChatMessage(phrase);
+                        },
+                      ),
+                    );
+                  }).toList(),
+                ),
+              ),
+              const Divider(color: Colors.white12, height: 12),
               Expanded(
                 child: ListView.builder(
-                  padding: const EdgeInsets.all(12),
+                  padding: const EdgeInsets.all(10),
                   itemCount: gs.tableChatMessages.length,
-                  itemBuilder: (ctx, i) {
-                    final m = gs.tableChatMessages[i];
+                  itemBuilder: (context, idx) {
+                    final m = gs.tableChatMessages[idx];
                     return Padding(
                       padding: const EdgeInsets.only(bottom: 8),
                       child: RichText(
                         text: TextSpan(
                           children: [
                             TextSpan(
-                              text: '${m['username'] ?? 'Oyuncu'}: ',
+                              text: '${m['username']}: ',
                               style: const TextStyle(
                                 color: Color(0xFFFBBF24),
                                 fontWeight: FontWeight.bold,
@@ -2425,7 +3497,7 @@ class _TableScreenState extends State<TableScreen> {
                               ),
                             ),
                             TextSpan(
-                              text: m['message']?.toString() ?? '',
+                              text: '${m['message']}',
                               style: const TextStyle(
                                 color: Colors.white,
                                 fontSize: 12,
@@ -2451,27 +3523,33 @@ class _TableScreenState extends State<TableScreen> {
                           hintText: 'Mesaj yaz...',
                           hintStyle: const TextStyle(color: Colors.white38),
                           filled: true,
-                          fillColor: Colors.white.withValues(alpha: 0.08),
+                          fillColor: Colors.white10,
                           contentPadding: const EdgeInsets.symmetric(
                             horizontal: 12,
                             vertical: 8,
                           ),
                           border: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(12),
+                            borderRadius: BorderRadius.circular(18),
                             borderSide: BorderSide.none,
                           ),
                         ),
+                        onSubmitted: (val) {
+                          if (val.trim().isNotEmpty) {
+                            gs.sendChatMessage(val.trim());
+                            _chatCtrl.clear();
+                          }
+                        },
                       ),
                     ),
                     const SizedBox(width: 6),
                     IconButton(
                       onPressed: () {
                         if (_chatCtrl.text.trim().isNotEmpty) {
-                          gs.sendChatMessage(_chatCtrl.text);
+                          gs.sendChatMessage(_chatCtrl.text.trim());
                           _chatCtrl.clear();
                         }
                       },
-                      icon: const Icon(Icons.send, color: Color(0xFFF59E0B)),
+                      icon: const Icon(Icons.send, color: Color(0xFFFBBF24)),
                     ),
                   ],
                 ),

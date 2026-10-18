@@ -29,13 +29,26 @@ const io = new Server(server, {
     origin: '*',
     methods: ['GET', 'POST'],
   },
-  maxHttpBufferSize: 5e6, // Sesli sohbet paketleri için 5MB limit
+  maxHttpBufferSize: 2e6, // Sesli sohbet paketleri için güvenli 2MB limit
 });
 
 const tableManager = new TableManager(io);
 
+// Basit hız sınırlayıcı (Rate Limiter: userId:event -> son gönderim zamanı)
+const rateLimits = new Map<string, number>();
+function checkRateLimit(userId: string, action: string, minIntervalMs: number): boolean {
+  const key = `${userId}:${action}`;
+  const now = Date.now();
+  const last = rateLimits.get(key) || 0;
+  if (now - last < minIntervalMs) {
+    return false;
+  }
+  rateLimits.set(key, now);
+  return true;
+}
+
 // Auth Middleware
-function requireAuth(req: Request, res: Response, next: NextFunction) {
+async function requireAuth(req: Request, res: Response, next: NextFunction) {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
     return res.status(401).json({ error: 'Oturum açmanız gerekiyor.' });
@@ -43,6 +56,10 @@ function requireAuth(req: Request, res: Response, next: NextFunction) {
   const token = authHeader.slice(7);
   try {
     const decoded = jwt.verify(token, JWT_SECRET) as JwtPayload;
+    const dbUser = await db.getUserById(decoded.userId);
+    if (!dbUser || dbUser.is_banned) {
+      return res.status(403).json({ error: 'Hesabınız askıya alınmıştır.' });
+    }
     (req as any).user = decoded;
     next();
   } catch {
@@ -109,13 +126,14 @@ app.post('/api/auth/login', async (req, res) => {
         avatar: user.avatar,
       },
       emojiCost: vault.emoji_cost,
+      activeTableId: tableManager.findUserActiveTableId(user.id),
     });
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Sunucu hatası.' });
   }
 });
 
-// Profil Bilgisi
+// Profil Bilgisi (JWT ile otomatik oturum yenileme)
 app.get('/api/auth/me', requireAuth, async (req, res) => {
   try {
     const jwtUser = (req as any).user as JwtPayload;
@@ -132,6 +150,7 @@ app.get('/api/auth/me', requireAuth, async (req, res) => {
         avatar: user.avatar,
       },
       emojiCost: vault.emoji_cost,
+      activeTableId: tableManager.findUserActiveTableId(user.id),
     });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -237,8 +256,12 @@ app.post('/api/admin/users/:id/credits', requireAdmin, async (req, res) => {
 
     const newCredits = await db.adjustCredits(targetUserId, numAmount, type, desc);
 
-    // Oyuncu online ise bakiyesini anında ekranında güncelle
-    io.emit('user_credit_sync', { userId: targetUserId, credits: newCredits });
+    // SADECE ilgili oyuncunun özel odasına bakiye senkronizasyonu gönder (Gizlilik)
+    io.to(`user:${targetUserId}`).emit('user_credit_sync', {
+      userId: targetUserId,
+      credits: newCredits,
+    });
+    tableManager.emitBalanceUpdate(targetUserId, newCredits);
 
     res.json({ success: true, credits: newCredits });
   } catch (err: any) {
@@ -264,8 +287,12 @@ app.post('/api/admin/users/:id/password', requireAdmin, async (req, res) => {
 app.post('/api/admin/users/:id/ban', requireAdmin, async (req, res) => {
   try {
     const { isBanned } = req.body;
-    await db.setUserBanStatus(req.params.id, Boolean(isBanned));
-    res.json({ success: true, is_banned: Boolean(isBanned) });
+    const banned = Boolean(isBanned);
+    await db.setUserBanStatus(req.params.id, banned);
+    if (banned) {
+      tableManager.disconnectUserSockets(req.params.id);
+    }
+    res.json({ success: true, is_banned: banned });
   } catch (err: any) {
     res.status(400).json({ error: err.message });
   }
@@ -284,23 +311,31 @@ app.post('/api/admin/settings/emoji-cost', requireAdmin, async (req, res) => {
   }
 });
 
-// Admin Masa Kapatma
-app.delete('/api/admin/tables/:id', requireAdmin, (req, res) => {
-  const closed = tableManager.closeTableByAdmin(req.params.id);
-  res.json({ success: closed });
+// Admin Masa Kapatma (Aktif pot varsa otomatik iade eder)
+app.delete('/api/admin/tables/:id', requireAdmin, async (req, res) => {
+  try {
+    const closed = await tableManager.closeTableByAdmin(req.params.id);
+    res.json({ success: closed });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // ==========================================
 // ⚡ SOCKET.IO GERÇEK ZAMANLI OYUN İLETİŞİMİ
 // ==========================================
 
-io.use((socket, next) => {
+io.use(async (socket, next) => {
   const token = socket.handshake.auth?.token || socket.handshake.query?.token;
   if (!token) {
     return next(new Error('Oturum anahtarı eksik.'));
   }
   try {
     const decoded = jwt.verify(String(token), JWT_SECRET) as JwtPayload;
+    const dbUser = await db.getUserById(decoded.userId);
+    if (!dbUser || dbUser.is_banned) {
+      return next(new Error('Hesabınız askıya alınmıştır.'));
+    }
     (socket as any).user = decoded;
     next();
   } catch {
@@ -310,7 +345,7 @@ io.use((socket, next) => {
 
 io.on('connection', (socket) => {
   const user = (socket as any).user as JwtPayload;
-  tableManager.registerUserSocket(user.userId, socket.id);
+  tableManager.registerUserSocket(socket, user.userId);
 
   // İlk bağlantıda lobi masalarını gönder
   socket.emit('lobby_tables', tableManager.getLobbyTablesSummary());
@@ -319,7 +354,7 @@ io.on('connection', (socket) => {
     socket.emit('lobby_tables', tableManager.getLobbyTablesSummary());
   });
 
-  // Yeni Masa Kurma (Min 2, Maks 6 Kişilik + Giriş Kredisi)
+  // Yeni Masa Kurma (Min 2, Maks 6 Kişilik + Giriş Kredisi + Yardımlı/Yardımsız Mod)
   socket.on('create_table', async (data, cb) => {
     try {
       const dbUser = await db.getUserById(user.userId);
@@ -328,12 +363,14 @@ io.on('connection', (socket) => {
       if (dbUser.credits < entryFee) {
         throw new Error(`Bu masayı kurmak için en az ${entryFee} krediniz olmalıdır.`);
       }
+      const isAssisted = data?.isAssisted !== undefined ? Boolean(data.isAssisted) : true;
       const table = tableManager.createTable(
         String(data?.name || `${dbUser.username} Masası`),
         dbUser.id,
         dbUser.username,
         Number(data?.maxPlayers || 4),
-        entryFee
+        entryFee,
+        isAssisted
       );
       if (cb) cb({ ok: true, tableId: table.id });
     } catch (err: any) {
@@ -372,9 +409,9 @@ io.on('connection', (socket) => {
   });
 
   // Koltuktan Kalkma
-  socket.on('stand_up', (data, cb) => {
+  socket.on('stand_up', async (data, cb) => {
     try {
-      tableManager.standUpFromSeat(user.userId, String(data?.tableId));
+      await tableManager.standUpFromSeat(user.userId, String(data?.tableId));
       if (cb) cb({ ok: true });
     } catch (err: any) {
       if (cb) cb({ ok: false, error: err.message });
@@ -394,9 +431,9 @@ io.on('connection', (socket) => {
   });
 
   // Ortadaki Desteden Kağıt Çekme
-  socket.on('draw_card', (data, cb) => {
+  socket.on('draw_card', async (data, cb) => {
     try {
-      tableManager.drawFromDeck(user.userId, String(data?.tableId));
+      await tableManager.drawFromDeck(user.userId, String(data?.tableId));
       if (cb) cb({ ok: true });
     } catch (err: any) {
       if (cb) cb({ ok: false, error: err.message });
@@ -405,9 +442,9 @@ io.on('connection', (socket) => {
   });
 
   // Yere Kağıt Atma
-  socket.on('discard_card', (data, cb) => {
+  socket.on('discard_card', async (data, cb) => {
     try {
-      tableManager.discardCard(
+      await tableManager.discardCard(
         user.userId,
         String(data?.tableId),
         String(data?.cardId)
@@ -419,13 +456,14 @@ io.on('connection', (socket) => {
     }
   });
 
-  // El Aç / Bitir (Tek Seferde Elden Bitiş)
-  socket.on('declare_finish', (data, cb) => {
+  // El Aç / Bitir (Yardımlı ve Yardımsız Mod destekli)
+  socket.on('declare_finish', async (data, cb) => {
     try {
-      tableManager.declareFinish(
+      await tableManager.declareFinish(
         user.userId,
         String(data?.tableId),
-        data?.discardCardId ? String(data.discardCardId) : undefined
+        data?.discardCardId ? String(data.discardCardId) : undefined,
+        Array.isArray(data?.rowCardIds) ? data.rowCardIds : undefined
       );
       if (cb) cb({ ok: true });
     } catch (err: any) {
@@ -434,12 +472,13 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Eldeki Kağıtları Sıralama / Otomatik Diz
+  // Eldeki Kağıtları Sıralama / 3 Sıralı Istaka Dizilimi
   socket.on('reorder_hand', (data) => {
     tableManager.reorderPlayerHand(
       user.userId,
       String(data?.tableId),
-      Array.isArray(data?.orderedCardIds) ? data.orderedCardIds : undefined
+      Array.isArray(data?.orderedCardIds) ? data.orderedCardIds : undefined,
+      Array.isArray(data?.rowCardIds) ? data.rowCardIds : undefined
     );
   });
 
@@ -454,11 +493,14 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Masa İçi Yazılı Sohbet
+  // Masa İçi Yazılı Sohbet (Masa üyeliği + Rate limit korumalı)
   socket.on('send_chat', async (data) => {
     const tableId = String(data?.tableId || '');
     const text = String(data?.message || '').trim().slice(0, 200);
     if (!tableId || !text) return;
+    if (!tableManager.isUserInTable(user.userId, tableId)) return;
+    if (!checkRateLimit(user.userId, 'chat', 700)) return;
+
     const dbUser = await db.getUserById(user.userId);
     io.to(`table:${tableId}`).emit('chat_message', {
       id: Date.now().toString(),
@@ -473,6 +515,9 @@ io.on('connection', (socket) => {
   // Masa İçi Ücretli Emoji / Efekt Gönderimi (Bomba, Domates, Gül, Alkış, Kahkaha, Ağlama)
   socket.on('send_effect', async (data, cb) => {
     try {
+      if (!checkRateLimit(user.userId, 'effect', 1200)) {
+        throw new Error('Çok hızlı efekt gönderiyorsunuz, lütfen biraz bekleyin.');
+      }
       await tableManager.sendInteractiveEffect(
         user.userId,
         String(data?.tableId),
@@ -490,16 +535,23 @@ io.on('connection', (socket) => {
   socket.on('voice_ptt', (data) => {
     const tableId = String(data?.tableId || '');
     if (!tableId) return;
+    if (!tableManager.isUserInTable(user.userId, tableId)) return;
+    const audioBase64 =
+      typeof data?.audioBase64 === 'string' && data.audioBase64.length <= 1500000
+        ? data.audioBase64
+        : null;
+    if (audioBase64 && !checkRateLimit(user.userId, 'voice_clip', 800)) return;
+
     io.to(`table:${tableId}`).emit('voice_ptt_stream', {
       userId: user.userId,
       username: user.username,
       isSpeaking: Boolean(data?.isSpeaking),
-      audioBase64: data?.audioBase64 || null,
+      audioBase64,
     });
   });
 
   socket.on('disconnect', () => {
-    tableManager.handleDisconnect(user.userId);
+    tableManager.handleDisconnect(user.userId, socket.id);
   });
 });
 

@@ -29,12 +29,20 @@ class _LoginScreenState extends State<LoginScreen> {
   Future<void> _loadSavedCredentials() async {
     final prefs = await SharedPreferences.getInstance();
     final savedUser = prefs.getString('saved_username');
-    final savedPass = prefs.getString('saved_password');
     if (savedUser != null && savedUser.isNotEmpty) {
       _usernameCtrl.text = savedUser;
-      _passwordCtrl.text = savedPass ?? '';
-      if (mounted) setState(() {});
+      if (mounted) setState(() => _loading = true);
     }
+
+    final autoLogged = await GameService.instance.tryAutoLogin();
+    if (!mounted) return;
+    if (autoLogged) {
+      Navigator.of(context).pushReplacement(
+        MaterialPageRoute(builder: (_) => const LobbyScreen()),
+      );
+      return;
+    }
+    setState(() => _loading = false);
   }
 
   Future<void> _handleLogin() async {
@@ -52,16 +60,11 @@ class _LoginScreenState extends State<LoginScreen> {
     });
 
     try {
-      await GameService.instance.login(uname, pass);
-
-      final prefs = await SharedPreferences.getInstance();
-      if (_rememberMe) {
-        await prefs.setString('saved_username', uname);
-        await prefs.setString('saved_password', pass);
-      } else {
-        await prefs.remove('saved_username');
-        await prefs.remove('saved_password');
-      }
+      await GameService.instance.login(
+        uname,
+        pass,
+        rememberMe: _rememberMe,
+      );
 
       if (!mounted) return;
       Navigator.of(context).pushReplacement(

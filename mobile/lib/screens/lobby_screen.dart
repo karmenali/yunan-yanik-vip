@@ -15,6 +15,8 @@ class LobbyScreen extends StatefulWidget {
 }
 
 class _LobbyScreenState extends State<LobbyScreen> {
+  String _selectedFilter = 'all'; // 'all', 'assisted', 'unassisted', 'open'
+
   @override
   void initState() {
     super.initState();
@@ -30,6 +32,138 @@ class _LobbyScreenState extends State<LobbyScreen> {
 
   void _onServiceUpdate() {
     if (mounted) setState(() {});
+  }
+
+  void _handleQuickPlay() {
+    final service = GameService.instance;
+    final userCredits = service.currentUser?.credits ?? 0;
+
+    // Eğer oyuncunun zaten oturduğu aktif bir masa varsa direkt oraya dön
+    if (service.rejoinedActiveTableId != null) {
+      _openTable(service.rejoinedActiveTableId!);
+      return;
+    }
+
+    // Bekleyen, boş koltuğu olan ve oyuncunun kredisinin yettiği en dolu masayı bul
+    final candidates = service.lobbyTables.where((t) {
+      final isWaiting = t.status == 'waiting' || t.status == 'finished';
+      final hasSeat = t.seatedCount < t.maxPlayers;
+      final canAfford = userCredits >= t.entryFee;
+      return isWaiting && hasSeat && canAfford;
+    }).toList();
+
+    if (candidates.isNotEmpty) {
+      candidates.sort((a, b) => b.seatedCount.compareTo(a.seatedCount));
+      final chosen = candidates.first;
+      _openTable(chosen.id, autoSit: true);
+    } else if (service.lobbyTables.isNotEmpty) {
+      _openTable(service.lobbyTables.first.id, autoSit: true);
+    } else {
+      _showCreateTableDialog();
+    }
+  }
+
+  Future<void> _showRulesSheet() async {
+    await showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF0A2419),
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(22)),
+      ),
+      builder: (ctx) {
+        return SizedBox(
+          height: MediaQuery.sizeOf(ctx).height * 0.78,
+          child: Padding(
+            padding: const EdgeInsets.all(18),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    const Text(
+                      '📖 Yunan Yanık VIP — Oyun Kuralları',
+                      style: TextStyle(
+                        color: Color(0xFFFDE047),
+                        fontWeight: FontWeight.w900,
+                        fontSize: 16.5,
+                      ),
+                    ),
+                    IconButton(
+                      onPressed: () => Navigator.pop(ctx),
+                      icon: const Icon(Icons.close, color: Colors.white70),
+                    ),
+                  ],
+                ),
+                const Divider(color: Colors.white24),
+                Expanded(
+                  child: ListView(
+                    children: [
+                      _buildRuleCard(
+                        '🃏 106 Kağıt & 3 Sıralı Dikey Istaka',
+                        'Oyun 2 tam deste (104 kağıt) + 2 Fiziksel Joker olmak üzere toplam 106 kağıtla oynanır. Her oyuncuya 10\'ar kağıt dağıtılır. Kağıtlarınızı ekrandaki 3 yatay sırada parmağınızla sürükleyerek dilediğiniz gibi gruplayabilirsiniz.',
+                      ),
+                      _buildRuleCard(
+                        '👑 Gösterge Jokeri (Wild Card)',
+                        'Dağıtım sonunda açılan Gösterge kağıdı ile aynı sayıdaki tüm kağıtlar (ve 2 fiziksel Joker) o el boyunca JOKER (Wild) yerine geçer. Boşta kalan Joker 25 ceza puanı yazar.',
+                      ),
+                      _buildRuleCard(
+                        '✨ Yardımlı Mod vs 🔥 Yardımsız (Usta) Mod',
+                        '• Yardımlı Mod: Geçerli perleriniz (✓ PER) ve elinizdeki ceza puanı otomatik gösterilir.\n'
+                            '• Yardımsız (Usta) Mod: Hiçbir per veya ceza ipucu gösterilmez! Herkes kendi perlerini 3 sırada dizer. DİKKAT: Yardımsız modda hatalı el açan oyuncu DİREKT YANMIŞ SAYILIR ve o maç için tekrar kredi yatırıp en yüksek puanlı oyuncudan devam etme (Re-buy) hakkını tamamen kaybeder!',
+                      ),
+                      _buildRuleCard(
+                        '🔍 Şeffaf El Açma (10 Sn Gösterim + Saat Yönü Ceza)',
+                        'Bir oyuncu el açtığında açtığı 10 kağıt tam 10 saniye boyunca masanın ortasında herkese açık gösterilir. Ardından diğer oyuncuların ellerinde kalan kağıtlar saat yönünde sırayla açılarak yedikleri ceza puanları şeffaf biçimde toplama eklenir.',
+                      ),
+                      _buildRuleCard(
+                        '🔥 101 Yanma & Yeniden Giriş (Re-buy)',
+                        'Toplam ceza puanı 101 veya üzerine çıkan oyuncu yanar. Masada en az 2 oyuncu devam ediyorsa (ve oyuncu hatalı el açarak yanmadıysa), 1x, 2x, 3x masa ücreti ödeyerek hayatta kalan en yüksek puanlı oyuncunun puanıyla maça geri dönebilir. Maç sonunda potun %95\'i şampiyona aktarılır!',
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildRuleCard(String title, String body) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: Colors.black26,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: const Color(0xFFD4AF37).withValues(alpha: 0.45)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            title,
+            style: const TextStyle(
+              color: Color(0xFFFDE047),
+              fontWeight: FontWeight.w900,
+              fontSize: 13.5,
+            ),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            body,
+            style: const TextStyle(
+              color: Colors.white70,
+              fontSize: 12.5,
+              height: 1.4,
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> _showPlayerHistorySheet() async {
@@ -83,7 +217,6 @@ class _LobbyScreenState extends State<LobbyScreen> {
                         ),
                       )
                     else ...[
-                      // Özet İstatistik Kartları
                       Row(
                         children: [
                           Expanded(
@@ -333,6 +466,7 @@ class _LobbyScreenState extends State<LobbyScreen> {
     );
     final feeCtrl = TextEditingController(text: '200');
     int maxPlayers = 4;
+    bool isAssisted = true;
 
     await showDialog(
       context: context,
@@ -371,7 +505,105 @@ class _LobbyScreenState extends State<LobbyScreen> {
                     ),
                   ),
                 ),
-                const SizedBox(height: 16),
+                const SizedBox(height: 14),
+                const Text(
+                  'Oyun Modu Seçimi:',
+                  style: TextStyle(
+                    color: Color(0xFFFDE047),
+                    fontWeight: FontWeight.bold,
+                    fontSize: 13,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    Expanded(
+                      child: InkWell(
+                        onTap: () => setDialogState(() => isAssisted = true),
+                        borderRadius: BorderRadius.circular(12),
+                        child: Container(
+                          padding: const EdgeInsets.all(10),
+                          decoration: BoxDecoration(
+                            color: isAssisted
+                                ? const Color(0xFF065F46)
+                                : Colors.black26,
+                            borderRadius: BorderRadius.circular(12),
+                            border: Border.all(
+                              color: isAssisted
+                                  ? const Color(0xFFFDE047)
+                                  : Colors.white24,
+                              width: isAssisted ? 2 : 1,
+                            ),
+                          ),
+                          child: const Column(
+                            children: [
+                              Text('✨ Yardımlı Mod',
+                                  style: TextStyle(
+                                      color: Colors.white,
+                                      fontWeight: FontWeight.w900,
+                                      fontSize: 12.5)),
+                              SizedBox(height: 3),
+                              Text('Per & Ceza Gösterir',
+                                  style: TextStyle(
+                                      color: Colors.white70, fontSize: 10.5)),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: InkWell(
+                        onTap: () => setDialogState(() => isAssisted = false),
+                        borderRadius: BorderRadius.circular(12),
+                        child: Container(
+                          padding: const EdgeInsets.all(10),
+                          decoration: BoxDecoration(
+                            color: !isAssisted
+                                ? const Color(0xFF991B1B)
+                                : Colors.black26,
+                            borderRadius: BorderRadius.circular(12),
+                            border: Border.all(
+                              color: !isAssisted
+                                  ? const Color(0xFFFDE047)
+                                  : Colors.white24,
+                              width: !isAssisted ? 2 : 1,
+                            ),
+                          ),
+                          child: const Column(
+                            children: [
+                              Text('🔥 Yardımsız Mod',
+                                  style: TextStyle(
+                                      color: Colors.white,
+                                      fontWeight: FontWeight.w900,
+                                      fontSize: 12.5)),
+                              SizedBox(height: 3),
+                              Text('Usta İşi • Ceza Korumasız',
+                                  style: TextStyle(
+                                      color: Colors.white70, fontSize: 10.5)),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                if (!isAssisted) ...[
+                  const SizedBox(height: 8),
+                  Container(
+                    padding: const EdgeInsets.all(9),
+                    decoration: BoxDecoration(
+                      color: Colors.red.shade900.withValues(alpha: 0.45),
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(color: Colors.redAccent),
+                    ),
+                    child: const Text(
+                      '⚠️ Yardımsız Mod Kuralı: Per ipucu verilmez. Hatalı el açan oyuncu direkt yanar ve o oyun için tekrar para yatırıp dahil olma (Re-buy) hakkını kaybeder!',
+                      style: TextStyle(color: Colors.white, fontSize: 11),
+                    ),
+                  ),
+                ],
+                const SizedBox(height: 14),
                 const Text(
                   'Masa Kapasitesi (Min 2 - Maks 6 Oyuncu):',
                   style: TextStyle(color: Colors.white70, fontSize: 13),
@@ -396,7 +628,7 @@ class _LobbyScreenState extends State<LobbyScreen> {
                     );
                   }).toList(),
                 ),
-                const SizedBox(height: 16),
+                const SizedBox(height: 14),
                 const Text(
                   'Oyun Giriş Kredisi (Kişi Başı 1x):',
                   style: TextStyle(color: Colors.white70, fontSize: 13),
@@ -433,11 +665,6 @@ class _LobbyScreenState extends State<LobbyScreen> {
                     ),
                   ),
                 ),
-                const SizedBox(height: 10),
-                const Text(
-                  'ℹ️ Oyuncular masadan ayrıldığında özel kurulan masa otomatik kapanır. Oyun sonunda potun %5\'i kasaya, %95\'i şampiyona gider.',
-                  style: TextStyle(color: Colors.white54, fontSize: 11.5),
-                ),
               ],
             ),
           ),
@@ -461,10 +688,11 @@ class _LobbyScreenState extends State<LobbyScreen> {
                     name: nameCtrl.text.trim(),
                     maxPlayers: maxPlayers,
                     entryFee: fee,
+                    isAssisted: isAssisted,
                   );
                   if (!ctx.mounted) return;
                   Navigator.pop(ctx);
-                  _openTable(tableId);
+                  _openTable(tableId, autoSit: true);
                 } catch (e) {
                   if (!mounted) return;
                   ScaffoldMessenger.of(context).showSnackBar(
@@ -547,8 +775,23 @@ class _LobbyScreenState extends State<LobbyScreen> {
     );
   }
 
-  Future<void> _openTable(String tableId) async {
+  Future<void> _openTable(String tableId, {bool autoSit = false}) async {
     GameService.instance.enterTable(tableId);
+    if (autoSit) {
+      Future.delayed(const Duration(milliseconds: 350), () {
+        final t = GameService.instance.activeTable;
+        final myId = GameService.instance.currentUser?.id;
+        if (t != null &&
+            t.id == tableId &&
+            (t.status == 'waiting' || t.status == 'finished') &&
+            !t.seats.any((s) => s?.userId == myId)) {
+          final emptyIdx = t.seats.indexWhere((s) => s == null);
+          if (emptyIdx != -1) {
+            GameService.instance.sitAtSeat(emptyIdx);
+          }
+        }
+      });
+    }
     await Navigator.of(context).push(
       MaterialPageRoute(builder: (_) => TableScreen(tableId: tableId)),
     );
@@ -559,7 +802,27 @@ class _LobbyScreenState extends State<LobbyScreen> {
     final service = GameService.instance;
     final user = service.currentUser;
     final avatar = VipAvatar.fromKey(user?.avatar);
-    final tables = service.lobbyTables;
+    final allTables = service.lobbyTables;
+
+    final filteredTables = allTables.where((t) {
+      if (_selectedFilter == 'assisted') return t.isAssisted;
+      if (_selectedFilter == 'unassisted') return !t.isAssisted;
+      if (_selectedFilter == 'open') {
+        return (t.status == 'waiting' || t.status == 'finished') &&
+            t.seatedCount < t.maxPlayers;
+      }
+      return true;
+    }).toList();
+
+    LobbyTableModel? activeRejoinTable;
+    if (service.rejoinedActiveTableId != null) {
+      for (final t in allTables) {
+        if (t.id == service.rejoinedActiveTableId) {
+          activeRejoinTable = t;
+          break;
+        }
+      }
+    }
 
     return Scaffold(
       backgroundColor: const Color(0xFF05160F),
@@ -584,7 +847,6 @@ class _LobbyScreenState extends State<LobbyScreen> {
                 children: [
                   Row(
                     children: [
-                      // Oyuncu Avatarı & İsim
                       Expanded(
                         child: InkWell(
                           onTap: _showAvatarPickerDialog,
@@ -640,8 +902,6 @@ class _LobbyScreenState extends State<LobbyScreen> {
                           ),
                         ),
                       ),
-
-                      // Kredi Rozeti (Tıklanınca Geçmişi Açar)
                       InkWell(
                         onTap: _showPlayerHistorySheet,
                         borderRadius: BorderRadius.circular(20),
@@ -677,9 +937,16 @@ class _LobbyScreenState extends State<LobbyScreen> {
                           ),
                         ),
                       ),
-                      const SizedBox(width: 4),
-
-                      // Geçmişim Butonu
+                      const SizedBox(width: 2),
+                      IconButton(
+                        tooltip: 'Oyun Kuralları',
+                        visualDensity: VisualDensity.compact,
+                        onPressed: _showRulesSheet,
+                        icon: const Icon(
+                          Icons.menu_book_rounded,
+                          color: Color(0xFFFDE047),
+                        ),
+                      ),
                       IconButton(
                         tooltip: 'Oyun & Kredi Geçmişim',
                         visualDensity: VisualDensity.compact,
@@ -689,21 +956,18 @@ class _LobbyScreenState extends State<LobbyScreen> {
                           color: Color(0xFFFDE047),
                         ),
                       ),
-
-                      // Ses & Oyun Ayarları Butonu
                       IconButton(
                         tooltip: 'Ses ve Oyun Ayarları',
                         visualDensity: VisualDensity.compact,
                         onPressed: _showSettingsDialog,
                         icon: const Icon(Icons.settings, color: Colors.white70),
                       ),
-
-                      // Çıkış Butonu
                       IconButton(
                         tooltip: 'Çıkış Yap',
                         visualDensity: VisualDensity.compact,
-                        onPressed: () {
-                          service.logout();
+                        onPressed: () async {
+                          await service.logout();
+                          if (!context.mounted) return;
                           Navigator.of(context).pushReplacement(
                             MaterialPageRoute(
                               builder: (_) => const LoginScreen(),
@@ -716,18 +980,18 @@ class _LobbyScreenState extends State<LobbyScreen> {
                   ),
                   const SizedBox(height: 10),
 
-                  // AKSİYON BUTONLARI SATIRI
+                  // AKSİYON BUTONLARI SATIRI (HIZLI OYNA + YENİ MASA KUR + ADMİN)
                   Row(
                     children: [
                       if (user?.isAdmin == true) ...[
                         Expanded(
                           child: SizedBox(
-                            height: 44,
+                            height: 42,
                             child: ElevatedButton.icon(
                               style: ElevatedButton.styleFrom(
                                 backgroundColor: const Color(0xFF7E22CE),
                                 foregroundColor: Colors.white,
-                                elevation: 4,
+                                padding: const EdgeInsets.symmetric(horizontal: 8),
                                 shape: RoundedRectangleBorder(
                                   borderRadius: BorderRadius.circular(12),
                                   side: const BorderSide(
@@ -745,41 +1009,70 @@ class _LobbyScreenState extends State<LobbyScreen> {
                               },
                               icon: const Icon(
                                 Icons.admin_panel_settings,
-                                size: 18,
+                                size: 16,
                               ),
                               label: const Text(
-                                'YÖNETİM PANELİ',
+                                'YÖNETİM',
                                 overflow: TextOverflow.ellipsis,
                                 style: TextStyle(
                                   fontWeight: FontWeight.w900,
-                                  fontSize: 12,
+                                  fontSize: 11,
                                 ),
                               ),
                             ),
                           ),
                         ),
-                        const SizedBox(width: 10),
+                        const SizedBox(width: 8),
                       ],
                       Expanded(
                         child: SizedBox(
-                          height: 44,
+                          height: 42,
+                          child: ElevatedButton.icon(
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: const Color(0xFF059669),
+                              foregroundColor: Colors.white,
+                              padding: const EdgeInsets.symmetric(horizontal: 8),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(12),
+                                side: const BorderSide(
+                                  color: Color(0xFF34D399),
+                                ),
+                              ),
+                            ),
+                            onPressed: _handleQuickPlay,
+                            icon: const Icon(Icons.flash_on_rounded, size: 17),
+                            label: const Text(
+                              'HIZLI OYNA',
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                fontWeight: FontWeight.w900,
+                                fontSize: 11.5,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: SizedBox(
+                          height: 42,
                           child: ElevatedButton.icon(
                             style: ElevatedButton.styleFrom(
                               backgroundColor: const Color(0xFFD4AF37),
                               foregroundColor: Colors.black,
-                              elevation: 4,
+                              padding: const EdgeInsets.symmetric(horizontal: 8),
                               shape: RoundedRectangleBorder(
                                 borderRadius: BorderRadius.circular(12),
                               ),
                             ),
                             onPressed: _showCreateTableDialog,
-                            icon: const Icon(Icons.add_circle, size: 18),
+                            icon: const Icon(Icons.add_circle, size: 17),
                             label: const Text(
-                              'YENİ MASA KUR',
+                              'MASA KUR',
                               overflow: TextOverflow.ellipsis,
                               style: TextStyle(
                                 fontWeight: FontWeight.w900,
-                                fontSize: 12,
+                                fontSize: 11.5,
                               ),
                             ),
                           ),
@@ -791,83 +1084,89 @@ class _LobbyScreenState extends State<LobbyScreen> {
               ),
             ),
 
-            // 2. YUNAN YANIK VIP ÖZEL KULÜP BANNER
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 10, 16, 4),
-              child: Container(
-                width: double.infinity,
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                decoration: BoxDecoration(
-                  gradient: const LinearGradient(
-                    colors: [Color(0xFF1A563B), Color(0xFF0A2418)],
-                  ),
+            // AKTİF MASANA DÖN BANNERI (Eğer oyuncunun devam eden bir masası varsa)
+            if (activeRejoinTable != null)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 10, 16, 0),
+                child: InkWell(
+                  onTap: () => _openTable(activeRejoinTable!.id),
                   borderRadius: BorderRadius.circular(14),
-                  border: Border.all(
-                    color: const Color(0xFFD4AF37).withValues(alpha: 0.75),
-                    width: 1.4,
-                  ),
-                ),
-                child: const Row(
-                  children: [
-                    Text('👑', style: TextStyle(fontSize: 22)),
-                    SizedBox(width: 10),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            'YUNAN YANIK VIP SALONU',
-                            style: TextStyle(
-                              color: Color(0xFFFDE047),
-                              fontWeight: FontWeight.w900,
-                              fontSize: 13,
-                              letterSpacing: 0.6,
-                            ),
-                          ),
-                          SizedBox(height: 2),
-                          Text(
-                            '106 Kağıt • Gösterge Jokeri • Tek Seferde El Aç • 101 Yanık & Re-buy',
-                            style: TextStyle(
-                              color: Colors.white70,
-                              fontSize: 11,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                        ],
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 14,
+                      vertical: 10,
+                    ),
+                    decoration: BoxDecoration(
+                      gradient: const LinearGradient(
+                        colors: [Color(0xFFB45309), Color(0xFF78350F)],
+                      ),
+                      borderRadius: BorderRadius.circular(14),
+                      border: Border.all(
+                        color: const Color(0xFFFDE047),
+                        width: 1.6,
                       ),
                     ),
-                  ],
-                ),
-              ),
-            ),
-
-            // 3. CANLI MASALAR BAŞLIĞI
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  const Text(
-                    '🟢 CANLI YUNAN YANIK MASALARI',
-                    style: TextStyle(
-                      color: Color(0xFFFDE047),
-                      fontWeight: FontWeight.w900,
-                      fontSize: 13,
-                      letterSpacing: 0.7,
+                    child: Row(
+                      children: [
+                        const Icon(
+                          Icons.play_circle_fill_rounded,
+                          color: Color(0xFFFDE047),
+                          size: 26,
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                'AKTİF OYUNUNUZ DEVAM EDİYOR: ${activeRejoinTable.name}',
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontWeight: FontWeight.w900,
+                                  fontSize: 12.5,
+                                ),
+                              ),
+                              const Text(
+                                'Koltuk ve eliniz korunuyor • Masaya dönmek için dokunun',
+                                style: TextStyle(
+                                  color: Color(0xFFFDE047),
+                                  fontSize: 11,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const Icon(
+                          Icons.arrow_forward_ios_rounded,
+                          color: Colors.white,
+                          size: 16,
+                        ),
+                      ],
                     ),
                   ),
-                  Text(
-                    '${tables.length} Masa Açık',
-                    style: const TextStyle(color: Colors.white60, fontSize: 12),
-                  ),
+                ),
+              ),
+
+            // 2. MASA FİLTRE SEKMELERİ
+            SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              padding: const EdgeInsets.fromLTRB(16, 10, 16, 4),
+              child: Row(
+                children: [
+                  _buildFilterChip('all', 'Tümü (${allTables.length})'),
+                  const SizedBox(width: 6),
+                  _buildFilterChip('assisted', '✨ Yardımlı Mod'),
+                  const SizedBox(width: 6),
+                  _buildFilterChip('unassisted', '🔥 Yardımsız (Usta)'),
+                  const SizedBox(width: 6),
+                  _buildFilterChip('open', '🪑 Boş Koltuk'),
                 ],
               ),
             ),
 
-            // 4. CANLI MASALAR LİSTESİ
+            // 3. CANLI MASALAR LİSTESİ
             Expanded(
-              child: tables.isEmpty
+              child: filteredTables.isEmpty
                   ? Center(
                       child: Column(
                         mainAxisAlignment: MainAxisAlignment.center,
@@ -875,9 +1174,9 @@ class _LobbyScreenState extends State<LobbyScreen> {
                           const Text('🃏', style: TextStyle(fontSize: 48)),
                           const SizedBox(height: 10),
                           const Text(
-                            'Şu anda açık masa yok. İlk masayı sen kur!',
+                            'Bu filtrede açık masa yok. Yeni bir masa kurabilirsiniz!',
                             style:
-                                TextStyle(color: Colors.white70, fontSize: 15),
+                                TextStyle(color: Colors.white70, fontSize: 14),
                           ),
                           const SizedBox(height: 14),
                           ElevatedButton.icon(
@@ -897,9 +1196,9 @@ class _LobbyScreenState extends State<LobbyScreen> {
                         horizontal: 16,
                         vertical: 6,
                       ),
-                      itemCount: tables.length,
+                      itemCount: filteredTables.length,
                       itemBuilder: (ctx, i) {
-                        final t = tables[i];
+                        final t = filteredTables[i];
                         final isPlaying = t.status == 'playing' ||
                             t.status == 'round_summary';
 
@@ -913,10 +1212,12 @@ class _LobbyScreenState extends State<LobbyScreen> {
                             ),
                             borderRadius: BorderRadius.circular(18),
                             border: Border.all(
-                              color: isPlaying
-                                  ? const Color(0xFF10B981)
-                                  : const Color(0xFFD4AF37)
-                                      .withValues(alpha: 0.8),
+                              color: !t.isAssisted
+                                  ? const Color(0xFFEF4444).withValues(alpha: 0.85)
+                                  : isPlaying
+                                      ? const Color(0xFF10B981)
+                                      : const Color(0xFFD4AF37)
+                                          .withValues(alpha: 0.8),
                               width: 1.6,
                             ),
                             boxShadow: [
@@ -978,6 +1279,35 @@ class _LobbyScreenState extends State<LobbyScreen> {
                                     spacing: 8,
                                     runSpacing: 6,
                                     children: [
+                                      Container(
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 9,
+                                          vertical: 4,
+                                        ),
+                                        decoration: BoxDecoration(
+                                          color: t.isAssisted
+                                              ? const Color(0xFF065F46)
+                                              : const Color(0xFF7F1D1D),
+                                          borderRadius:
+                                              BorderRadius.circular(8),
+                                          border: Border.all(
+                                            color: t.isAssisted
+                                                ? const Color(0xFF34D399)
+                                                : const Color(0xFFF87171),
+                                            width: 0.9,
+                                          ),
+                                        ),
+                                        child: Text(
+                                          t.isAssisted
+                                              ? '✨ Yardımlı Mod'
+                                              : '🔥 Yardımsız (Usta)',
+                                          style: const TextStyle(
+                                            color: Colors.white,
+                                            fontWeight: FontWeight.w900,
+                                            fontSize: 11,
+                                          ),
+                                        ),
+                                      ),
                                       Container(
                                         padding: const EdgeInsets.symmetric(
                                           horizontal: 10,
@@ -1126,5 +1456,20 @@ class _LobbyScreenState extends State<LobbyScreen> {
       ),
     );
   }
-}
 
+  Widget _buildFilterChip(String key, String label) {
+    final selected = _selectedFilter == key;
+    return ChoiceChip(
+      label: Text(label),
+      selected: selected,
+      selectedColor: const Color(0xFFD4AF37),
+      backgroundColor: const Color(0xFF0E2F21),
+      labelStyle: TextStyle(
+        color: selected ? Colors.black : Colors.white70,
+        fontWeight: FontWeight.w800,
+        fontSize: 11.5,
+      ),
+      onSelected: (_) => setState(() => _selectedFilter = key),
+    );
+  }
+}

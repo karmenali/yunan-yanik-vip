@@ -5,7 +5,6 @@ import {
   dealRoundHands,
   evaluateHandOptimal,
   findWinningDiscard,
-  isWildCard,
   selectBestAutoDiscard,
 } from './gameEngine';
 import { db } from '../db';
@@ -19,9 +18,12 @@ export interface SeatPlayer {
   isConnected: boolean;
   totalScore: number;
   isEliminated: boolean;
+  forfeitedRebuy: boolean; // Yardımsız modda hatalı el açarsa re-buy hakkını tamamen kaybeder
   rebuyCount: number; // Kaç kez yandı ve geri döndü (0 -> ilk yanışta 1x öder, 1 -> 2x öder, 2 -> 3x öder)
   awaitingRebuyDecision: boolean;
+  consecutiveTimeouts: number;
   hand: Card[];
+  handRows?: string[][]; // 3 sıralı ıstaka dizilimi
 }
 
 export interface RoundScoreSnapshot {
@@ -29,12 +31,20 @@ export interface RoundScoreSnapshot {
   scoresByUser: Record<string, number>; // O el alınan ceza puanı
   totalsByUser: Record<string, number>; // O el sonu toplam puan
   finisherUserId: string | null;
+  falseDeclarerUserId?: string | null;
 }
 
 export interface ShowdownPlayerResult {
   userId: string;
   username: string;
   avatar: string;
+  seatIndex: number;
+  isFinisher: boolean;
+  isFalseDeclarer: boolean;
+  forfeitedRebuy: boolean;
+  revealOrder: number;
+  revealStartMs: number;
+  revealDurationMs: number;
   melds: Card[][];
   unmelded: Card[];
   roundPenalty: number;
@@ -55,8 +65,10 @@ export interface GameTable {
   minPlayers: number;
   maxPlayers: number;
   entryFee: number;
-  status: 'waiting' | 'playing' | 'round_summary' | 'finished';
+  isAssisted: boolean; // true = Yardımlı Mod (Per/Ceza göstergeli), false = Yardımsız Usta Modu
+  status: 'waiting' | 'starting' | 'playing' | 'round_summary' | 'finished';
   pot: number;
+  matchContributions: Record<string, number>;
   roundNumber: number;
   seats: (SeatPlayer | null)[];
   spectators: Set<string>;
@@ -69,11 +81,16 @@ export interface GameTable {
   dealerSeat: number;
   hasDrawnThisTurn: boolean;
   turnDeadline: number;
+  turnDurationSeconds: number;
   matchStartedAt: number;
   turnTimer?: NodeJS.Timeout;
   phaseTimer?: NodeJS.Timeout;
   activePlayersAtRoundStart: number;
   lastShowdown: ShowdownPlayerResult[] | null;
+  lastFinisherUserId: string | null;
+  lastFalseDeclarerUserId: string | null;
+  showdownStartedAt: number;
+  showdownTotalMs: number;
   scoreHistory: RoundScoreSnapshot[];
   lastWinnerInfo: {
     userId: string;
@@ -97,13 +114,31 @@ export const INTERACTIVE_EFFECTS: Record<string, { name: string; icon: string }>
 export class TableManager {
   private io: Server;
   private tables: Map<string, GameTable> = new Map();
-  private userSockets: Map<string, string> = new Map(); // userId -> socketId
+  // Çoklu sekme veya Wi-Fi/4G geçişlerinde soket çakışmasını önlemek için Set<socketId>
+  private userSockets: Map<string, Set<string>> = new Map();
+  // Masa bazlı asenkron işlem kuyruğu (Race Condition / Mutex kilidi)
+  private tableLocks: Map<string, Promise<any>> = new Map();
 
   constructor(io: Server) {
     this.io = io;
     this.seedDefaultTables();
     // Her 1 saniyede bir aktif masalara canlı sayaç (hamle kalan süre + toplam maç süresi) gönder
     setInterval(() => this.tickActiveTables(), 1000);
+  }
+
+  /**
+   * Aynı masadaki tüm kritik durum ve bakiye işlemlerini sıraya sokar (Per-Table Mutex)
+   */
+  private enqueueTableAction<T>(tableId: string, fn: () => Promise<T> | T): Promise<T> {
+    const prev = this.tableLocks.get(tableId) || Promise.resolve();
+    const next = prev
+      .catch(() => {})
+      .then(() => fn());
+    this.tableLocks.set(
+      tableId,
+      next.catch(() => {})
+    );
+    return next;
   }
 
   private tickActiveTables() {
@@ -124,6 +159,7 @@ export class TableManager {
           status: table.status,
           currentTurnSeat: table.currentTurnSeat,
           turnRemainingSeconds,
+          turnDurationSeconds: table.turnDurationSeconds,
           matchElapsedSeconds,
         });
       }
@@ -131,33 +167,129 @@ export class TableManager {
   }
 
   private seedDefaultTables() {
-    this.createTable('VIP Salon #1 (2 Kişilik)', 'system', 'Kulüp', 2, 100);
-    this.createTable('Atina Meydanı (4 Kişilik)', 'system', 'Kulüp', 4, 250);
-    this.createTable('Büyük Masa (6 Kişilik)', 'system', 'Kulüp', 6, 500);
+    this.createTable('VIP Salon #1 (2 Kişilik)', 'system', 'Kulüp', 2, 100, true);
+    this.createTable('Atina Meydanı (4 Kişilik)', 'system', 'Kulüp', 4, 250, true);
+    this.createTable('Usta Salonu (Yardımsız 4 Kişilik)', 'system', 'Kulüp', 4, 300, false);
+    this.createTable('Büyük Masa (6 Kişilik)', 'system', 'Kulüp', 6, 500, true);
   }
 
-  registerUserSocket(userId: string, socketId: string) {
-    this.userSockets.set(userId, socketId);
-    // Oyuncu bir masada oturuyorsa bağlantı durumunu güncelle
+  private splitHandIntoDefaultRows(cards: Card[]): string[][] {
+    if (cards.length === 0) return [[], [], []];
+    const r0 = cards.slice(0, 4).map((c) => c.id);
+    const r1 = cards.slice(4, 7).map((c) => c.id);
+    const r2 = cards.slice(7).map((c) => c.id);
+    return [r0, r1, r2];
+  }
+
+  private syncSeatHandRows(seat: SeatPlayer) {
+    const validIds = new Set(seat.hand.map((c) => c.id));
+    if (!seat.handRows || seat.handRows.length !== 3) {
+      seat.handRows = this.splitHandIntoDefaultRows(seat.hand);
+      return;
+    }
+
+    const seen = new Set<string>();
+    const cleanedRows: string[][] = [[], [], []];
+    for (let r = 0; r < 3; r++) {
+      for (const id of seat.handRows[r] || []) {
+        if (validIds.has(id) && !seen.has(id)) {
+          cleanedRows[r].push(id);
+          seen.add(id);
+        }
+      }
+    }
+
+    // Yeni çekilen veya eksik kalan kağıtları en az kağıt olan sıraya ekle
+    for (const c of seat.hand) {
+      if (!seen.has(c.id)) {
+        let targetRow = 2;
+        if (cleanedRows[0].length <= cleanedRows[1].length && cleanedRows[0].length <= cleanedRows[2].length) {
+          targetRow = 0;
+        } else if (cleanedRows[1].length <= cleanedRows[2].length) {
+          targetRow = 1;
+        }
+        cleanedRows[targetRow].push(c.id);
+        seen.add(c.id);
+      }
+    }
+
+    seat.handRows = cleanedRows;
+  }
+
+  registerUserSocket(socket: Socket, userId: string) {
+    socket.join(`user:${userId}`);
+    let set = this.userSockets.get(userId);
+    if (!set) {
+      set = new Set();
+      this.userSockets.set(userId, set);
+    }
+    set.add(socket.id);
+
+    // Oyuncu bir masada oturuyorsa bağlantı durumunu güncelle ve odaya otomatik dahil et
     for (const table of this.tables.values()) {
       let updated = false;
       for (const seat of table.seats) {
         if (seat && seat.userId === userId) {
           seat.isConnected = true;
+          seat.consecutiveTimeouts = 0;
           updated = true;
         }
       }
       if (updated) {
+        socket.join(`table:${table.id}`);
         this.broadcastTableState(table.id);
+        socket.emit('active_table_rejoined', {
+          tableId: table.id,
+          tableName: table.name,
+          status: table.status,
+        });
       }
     }
+  }
+
+  disconnectUserSockets(userId: string) {
+    const set = this.userSockets.get(userId);
+    if (!set) return;
+    for (const sid of set) {
+      const sock = this.io.sockets.sockets.get(sid);
+      if (sock) {
+        sock.emit('error_msg', 'Hesabınız yönetici tarafından askıya alındı.');
+        sock.disconnect(true);
+      }
+    }
+    this.userSockets.delete(userId);
+  }
+
+  findUserActiveTableId(userId: string): string | null {
+    for (const table of this.tables.values()) {
+      if (table.seats.some((s) => s?.userId === userId)) {
+        return table.id;
+      }
+    }
+    return null;
+  }
+
+  isUserInTable(userId: string, tableId: string): boolean {
+    const table = this.tables.get(tableId);
+    if (!table) return false;
+    if (table.spectators.has(userId)) return true;
+    return table.seats.some((s) => s?.userId === userId);
   }
 
   private cleanupTableIfEmpty(tableId: string): boolean {
     const table = this.tables.get(tableId);
     if (!table) return false;
-    // Kulübün 3 varsayılan salon masası her zaman açık kalır, oyuncuların kurduğu masalar boşalınca silinir
+    // Kulübün varsayılan salon masaları her zaman açık kalır
     if (table.hostUserId === 'system') return false;
+    // KRİTİK KORUMA: Aktif oyun veya pot varken masa ASLA silinmez!
+    if (
+      table.status === 'playing' ||
+      table.status === 'round_summary' ||
+      table.status === 'starting' ||
+      table.pot > 0
+    ) {
+      return false;
+    }
 
     const hasSeated = table.seats.some((s) => s !== null && s.isConnected);
     const hasSpectators = table.spectators.size > 0;
@@ -166,13 +298,23 @@ export class TableManager {
       if (table.turnTimer) clearTimeout(table.turnTimer);
       if (table.phaseTimer) clearTimeout(table.phaseTimer);
       this.tables.delete(tableId);
+      this.tableLocks.delete(tableId);
       return true;
     }
     return false;
   }
 
-  handleDisconnect(userId: string) {
-    this.userSockets.delete(userId);
+  handleDisconnect(userId: string, socketId: string) {
+    const set = this.userSockets.get(userId);
+    if (set) {
+      set.delete(socketId);
+      if (set.size > 0) {
+        // Kullanıcının başka bir aktif soketi hala bağlı (Wi-Fi -> 4G geçişi)
+        return;
+      }
+      this.userSockets.delete(userId);
+    }
+
     for (const table of Array.from(this.tables.values())) {
       table.spectators.delete(userId);
       let updated = false;
@@ -200,7 +342,8 @@ export class TableManager {
     hostUserId: string,
     hostUsername: string,
     maxPlayers: number,
-    entryFee: number
+    entryFee: number,
+    isAssisted = true
   ): GameTable {
     const clampedMax = Math.min(6, Math.max(2, Math.round(maxPlayers)));
     const cleanFee = Math.max(10, Math.round(entryFee));
@@ -214,8 +357,10 @@ export class TableManager {
       minPlayers: 2,
       maxPlayers: clampedMax,
       entryFee: cleanFee,
+      isAssisted: Boolean(isAssisted),
       status: 'waiting',
       pot: 0,
+      matchContributions: {},
       roundNumber: 0,
       seats: Array(clampedMax).fill(null),
       spectators: new Set(),
@@ -227,9 +372,14 @@ export class TableManager {
       dealerSeat: 0,
       hasDrawnThisTurn: false,
       turnDeadline: 0,
+      turnDurationSeconds: 30,
       matchStartedAt: 0,
       activePlayersAtRoundStart: 0,
       lastShowdown: null,
+      lastFinisherUserId: null,
+      lastFalseDeclarerUserId: null,
+      showdownStartedAt: 0,
+      showdownTotalMs: 0,
       scoreHistory: [],
       lastWinnerInfo: null,
     };
@@ -239,15 +389,32 @@ export class TableManager {
     return table;
   }
 
-  closeTableByAdmin(tableId: string): boolean {
+  async closeTableByAdmin(tableId: string): Promise<boolean> {
     const table = this.tables.get(tableId);
     if (!table) return false;
     if (table.turnTimer) clearTimeout(table.turnTimer);
     if (table.phaseTimer) clearTimeout(table.phaseTimer);
+
+    // Eğer masada aktif pot varsa tüm oyunculara yatırdıkları kredileri eksiksiz iade et!
+    if (table.pot > 0) {
+      try {
+        const refunded = await db.refundMatchEscrow(
+          tableId,
+          `${table.name} yönetici tarafından kapatıldı (Pot İadesi)`
+        );
+        for (const r of refunded) {
+          this.emitBalanceUpdate(r.userId, r.newCredits);
+        }
+      } catch (err) {
+        console.error('Admin masa kapatma iade hatası:', err);
+      }
+    }
+
     this.io.to(`table:${tableId}`).emit('table_closed', {
-      message: 'Bu masa yönetici tarafından kapatıldı.',
+      message: 'Bu masa yönetici tarafından kapatıldı. Aktif pot varsa bakiyenize iade edildi.',
     });
     this.tables.delete(tableId);
+    this.tableLocks.delete(tableId);
     this.broadcastLobbyTables();
     return true;
   }
@@ -260,7 +427,8 @@ export class TableManager {
       minPlayers: t.minPlayers,
       maxPlayers: t.maxPlayers,
       entryFee: t.entryFee,
-      status: t.status,
+      isAssisted: t.isAssisted,
+      status: t.status === 'starting' ? 'playing' : t.status,
       pot: t.pot,
       roundNumber: t.roundNumber,
       seatedCount: t.seats.filter((s) => s !== null).length,
@@ -287,6 +455,11 @@ export class TableManager {
     }
     socket.join(`table:${tableId}`);
     table.spectators.add(userId);
+    const seat = table.seats.find((s) => s?.userId === userId);
+    if (seat) {
+      seat.isConnected = true;
+      seat.consecutiveTimeouts = 0;
+    }
     this.sendTableStateToUser(table, userId);
   }
 
@@ -314,123 +487,159 @@ export class TableManager {
   }
 
   async sitAtSeat(userId: string, tableId: string, seatIndex: number): Promise<void> {
-    const table = this.tables.get(tableId);
-    if (!table) throw new Error('Masa bulunamadı.');
-    if (table.status !== 'waiting' && table.status !== 'finished') {
-      throw new Error('Oyun devam ederken koltuğa oturulamaz.');
-    }
-    if (seatIndex < 0 || seatIndex >= table.maxPlayers) {
-      throw new Error('Geçersiz koltuk numarası.');
-    }
-    if (table.seats[seatIndex] !== null) {
-      throw new Error('Bu koltuk dolu.');
-    }
-
-    const user = await db.getUserById(userId);
-    if (!user) throw new Error('Kullanıcı bulunamadı.');
-    if (user.is_banned) throw new Error('Hesabınız askıya alınmıştır.');
-    if (user.credits < table.entryFee) {
-      throw new Error(`Bu masaya oturmak için en az ${table.entryFee} kredi gereklidir.`);
-    }
-
-    // Oyuncu aynı masada başka koltukta oturuyorsa oradan kaldır
-    for (let i = 0; i < table.seats.length; i++) {
-      if (table.seats[i]?.userId === userId) {
-        table.seats[i] = null;
+    return this.enqueueTableAction(tableId, async () => {
+      const table = this.tables.get(tableId);
+      if (!table) throw new Error('Masa bulunamadı.');
+      if (table.status !== 'waiting' && table.status !== 'finished') {
+        throw new Error('Oyun devam ederken koltuğa oturulamaz.');
       }
-    }
+      if (seatIndex < 0 || seatIndex >= table.maxPlayers) {
+        throw new Error('Geçersiz koltuk numarası.');
+      }
+      if (table.seats[seatIndex] !== null && table.seats[seatIndex]?.userId !== userId) {
+        throw new Error('Bu koltuk dolu.');
+      }
 
-    table.seats[seatIndex] = {
-      userId: user.id,
-      username: user.username,
-      avatar: user.avatar,
-      seatIndex,
-      isReady: false,
-      isConnected: true,
-      totalScore: 0,
-      isEliminated: false,
-      rebuyCount: 0,
-      awaitingRebuyDecision: false,
-      hand: [],
-    };
-
-    if (table.status === 'finished') {
-      table.status = 'waiting';
-      table.lastWinnerInfo = null;
-      table.lastShowdown = null;
-      for (const s of table.seats) {
-        if (s) {
-          s.isEliminated = false;
-          s.totalScore = 0;
-          s.hand = [];
+      // Oyuncu başka bir masada aktif oyundaysa oturamasın
+      for (const otherTable of this.tables.values()) {
+        if (
+          otherTable.id !== tableId &&
+          (otherTable.status === 'playing' || otherTable.status === 'round_summary') &&
+          otherTable.seats.some((s) => s?.userId === userId && !s.isEliminated)
+        ) {
+          throw new Error(`Zaten "${otherTable.name}" masasında devam eden bir oyununuz var.`);
         }
       }
-    }
 
-    this.broadcastTableState(tableId);
-    this.broadcastLobbyTables();
+      const user = await db.getUserById(userId);
+      if (!user) throw new Error('Kullanıcı bulunamadı.');
+      if (user.is_banned) throw new Error('Hesabınız askıya alınmıştır.');
+      if (user.credits < table.entryFee) {
+        throw new Error(`Bu masaya oturmak için en az ${table.entryFee} kredi gereklidir.`);
+      }
+
+      // Yeniden kontrol (async DB sorgusu sonrası koltuk dolmuş olabilir)
+      if (table.status !== 'waiting' && table.status !== 'finished') {
+        throw new Error('Oyun devam ederken koltuğa oturulamaz.');
+      }
+      if (table.seats[seatIndex] !== null && table.seats[seatIndex]?.userId !== userId) {
+        throw new Error('Bu koltuk az önce doldu.');
+      }
+
+      // Oyuncu aynı masada başka koltukta oturuyorsa oradan kaldır
+      for (let i = 0; i < table.seats.length; i++) {
+        if (table.seats[i]?.userId === userId) {
+          table.seats[i] = null;
+        }
+      }
+
+      table.seats[seatIndex] = {
+        userId: user.id,
+        username: user.username,
+        avatar: user.avatar,
+        seatIndex,
+        isReady: false,
+        isConnected: true,
+        totalScore: 0,
+        isEliminated: false,
+        forfeitedRebuy: false,
+        rebuyCount: 0,
+        awaitingRebuyDecision: false,
+        consecutiveTimeouts: 0,
+        hand: [],
+        handRows: [[], [], []],
+      };
+
+      if (table.status === 'finished') {
+        table.status = 'waiting';
+        table.lastWinnerInfo = null;
+        table.lastShowdown = null;
+        for (const s of table.seats) {
+          if (s) {
+            s.isEliminated = false;
+            s.forfeitedRebuy = false;
+            s.totalScore = 0;
+            s.hand = [];
+            s.handRows = [[], [], []];
+          }
+        }
+      }
+
+      this.broadcastTableState(tableId);
+      this.broadcastLobbyTables();
+    });
   }
 
   standUpFromSeat(userId: string, tableId: string) {
-    const table = this.tables.get(tableId);
-    if (!table) return;
-    if (table.status !== 'waiting' && table.status !== 'finished') {
-      throw new Error('Aktif oyun sırasında koltuktan kalkılamaz.');
-    }
-    for (let i = 0; i < table.seats.length; i++) {
-      if (table.seats[i]?.userId === userId) {
-        table.seats[i] = null;
+    return this.enqueueTableAction(tableId, () => {
+      const table = this.tables.get(tableId);
+      if (!table) return;
+      if (table.status !== 'waiting' && table.status !== 'finished') {
+        throw new Error('Aktif oyun sırasında koltuktan kalkılamaz.');
       }
-    }
-    this.broadcastTableState(tableId);
-    this.broadcastLobbyTables();
+      for (let i = 0; i < table.seats.length; i++) {
+        if (table.seats[i]?.userId === userId) {
+          table.seats[i] = null;
+        }
+      }
+      this.broadcastTableState(tableId);
+      this.broadcastLobbyTables();
+    });
   }
 
   async toggleReady(userId: string, tableId: string): Promise<void> {
-    const table = this.tables.get(tableId);
-    if (!table) throw new Error('Masa bulunamadı.');
-    if (table.status !== 'waiting' && table.status !== 'finished') {
-      throw new Error('Oyun zaten başladı.');
-    }
+    return this.enqueueTableAction(tableId, async () => {
+      const table = this.tables.get(tableId);
+      if (!table) throw new Error('Masa bulunamadı.');
+      if (table.status !== 'waiting' && table.status !== 'finished') {
+        throw new Error('Oyun zaten başladı.');
+      }
 
-    const seat = table.seats.find((s) => s?.userId === userId);
-    if (!seat) throw new Error('Önce bir koltuğa oturmalısınız.');
+      const seat = table.seats.find((s) => s?.userId === userId);
+      if (!seat) throw new Error('Önce bir koltuğa oturmalısınız.');
 
-    const user = await db.getUserById(userId);
-    if (!user || user.credits < table.entryFee) {
-      throw new Error(`Oyuna başlamak için ${table.entryFee} kredi gereklidir.`);
-    }
+      const user = await db.getUserById(userId);
+      if (!user || user.credits < table.entryFee) {
+        throw new Error(`Oyuna başlamak için ${table.entryFee} kredi gereklidir.`);
+      }
 
-    if (table.status === 'finished') {
-      table.status = 'waiting';
-      table.lastWinnerInfo = null;
-      table.lastShowdown = null;
-      for (const s of table.seats) {
-        if (s) {
-          s.isEliminated = false;
-          s.totalScore = 0;
-          s.hand = [];
+      if (table.status === 'finished') {
+        table.status = 'waiting';
+        table.lastWinnerInfo = null;
+        table.lastShowdown = null;
+        for (const s of table.seats) {
+          if (s) {
+            s.isEliminated = false;
+            s.forfeitedRebuy = false;
+            s.totalScore = 0;
+            s.hand = [];
+            s.handRows = [[], [], []];
+          }
         }
       }
-    }
 
-    seat.isReady = !seat.isReady;
-    this.broadcastTableState(tableId);
+      seat.isReady = !seat.isReady;
+      this.broadcastTableState(tableId);
 
-    // Masada en az 2 oyuncu oturuyor ve oturan HERKES Hazır dediyse oyunu başlat!
-    const seatedPlayers = table.seats.filter((s): s is SeatPlayer => s !== null);
-    if (seatedPlayers.length >= table.minPlayers && seatedPlayers.every((s) => s.isReady)) {
-      await this.startMatch(table);
-    }
+      // Masada en az 2 oyuncu oturuyor ve oturan HERKES Hazır dediyse oyunu başlat!
+      const seatedPlayers = table.seats.filter((s): s is SeatPlayer => s !== null);
+      if (seatedPlayers.length >= table.minPlayers && seatedPlayers.every((s) => s.isReady)) {
+        await this.startMatch(table);
+      }
+    });
   }
 
   private async startMatch(table: GameTable): Promise<void> {
+    if (table.status !== 'waiting') return;
     const seatedPlayers = table.seats.filter((s): s is SeatPlayer => s !== null);
     if (seatedPlayers.length < 2) return;
 
-    // Her oyuncudan 1x masa giriş kredisini tahsil et ve Pot'a ekle
+    // Senkron kilit: Çift tahsilatı önlemek için durumu hemen 'starting' yap
+    table.status = 'starting';
+
     let collectedPot = 0;
     const chargedUsers: string[] = [];
+    const contributions: Record<string, number> = {};
 
     try {
       for (const p of seatedPlayers) {
@@ -442,19 +651,23 @@ export class TableManager {
         );
         chargedUsers.push(p.userId);
         collectedPot += table.entryFee;
+        contributions[p.userId] = (contributions[p.userId] || 0) + table.entryFee;
         this.emitBalanceUpdate(p.userId, newBal);
       }
     } catch (err: any) {
       // Bir oyuncunun bakiyesi yetmediyse diğerlerine iade et
       for (const uid of chargedUsers) {
-        const bal = await db.adjustCredits(
-          uid,
-          table.entryFee,
-          'table_refund',
-          `${table.name} masa başlangıç iptali iadesi`
-        );
-        this.emitBalanceUpdate(uid, bal);
+        try {
+          const bal = await db.adjustCredits(
+            uid,
+            table.entryFee,
+            'table_refund',
+            `${table.name} masa başlangıç iptali iadesi`
+          );
+          this.emitBalanceUpdate(uid, bal);
+        } catch {}
       }
+      table.status = 'waiting';
       for (const p of seatedPlayers) p.isReady = false;
       this.io.to(`table:${table.id}`).emit('error_msg', `Oyun başlatılamadı: ${err.message}`);
       this.broadcastTableState(table.id);
@@ -463,18 +676,31 @@ export class TableManager {
 
     table.status = 'playing';
     table.pot = collectedPot;
+    table.matchContributions = contributions;
     table.roundNumber = 0;
     table.matchStartedAt = Date.now();
     table.scoreHistory = [];
     table.lastWinnerInfo = null;
     table.lastShowdown = null;
+    table.lastFinisherUserId = null;
+    table.lastFalseDeclarerUserId = null;
+
+    // Aktif maçı veritabanı escrow tablosuna kaydet (Crash koruması)
+    try {
+      await db.upsertMatchEscrow(table.id, table.name, table.pot, table.matchContributions);
+    } catch (err) {
+      console.error('Escrow kayıt hatası:', err);
+    }
 
     for (const p of seatedPlayers) {
       p.totalScore = 0;
       p.isEliminated = false;
+      p.forfeitedRebuy = false;
       p.rebuyCount = 0;
       p.awaitingRebuyDecision = false;
+      p.consecutiveTimeouts = 0;
       p.hand = [];
+      p.handRows = [[], [], []];
     }
 
     // İlk dağıtan rastgele bir koltuk
@@ -501,6 +727,8 @@ export class TableManager {
     table.roundNumber += 1;
     table.activePlayersAtRoundStart = activePlayers.length;
     table.lastShowdown = null;
+    table.lastFinisherUserId = null;
+    table.lastFalseDeclarerUserId = null;
     table.discardPile = [];
 
     const activeIds = activePlayers.map((p) => p.userId);
@@ -511,10 +739,17 @@ export class TableManager {
       seat.awaitingRebuyDecision = false;
       if (!seat.isEliminated) {
         const dealt = hands[seat.userId] || [];
-        // Oyuncuya başlangıçta düzenli bir el sun
-        seat.hand = evaluateHandOptimal(dealt, wildRank).orderedCards;
+        if (table.isAssisted) {
+          // Yardımlı modda başlangıçta düzenli bir el sun
+          seat.hand = evaluateHandOptimal(dealt, wildRank).orderedCards;
+        } else {
+          // Yardımsız (Usta) modda kağıtları olduğu gibi ver, oyuncu kendi dizsin
+          seat.hand = [...dealt];
+        }
+        seat.handRows = this.splitHandIntoDefaultRows(seat.hand);
       } else {
         seat.hand = [];
+        seat.handRows = [[], [], []];
       }
     }
 
@@ -531,6 +766,8 @@ export class TableManager {
       roundNumber: table.roundNumber,
       indicatorCard: table.indicatorCard,
       wildRank: table.wildRank,
+      dealerSeat: table.dealerSeat,
+      currentTurnSeat: table.currentTurnSeat,
     });
 
     this.startTurnTimer(table);
@@ -551,15 +788,29 @@ export class TableManager {
 
   private startTurnTimer(table: GameTable) {
     if (table.turnTimer) clearTimeout(table.turnTimer);
-    table.turnDeadline = Date.now() + 30000; // 30 saniye hamle süresi
+
+    const currentSeat = table.seats[table.currentTurnSeat];
+    // Bağlantısı kopuk veya üst üste 2 kez süre aşımı yapan oyuncunun süresini 8 saniyeye düşür (Anti-Stall)
+    const isFastTimeout =
+      currentSeat && (!currentSeat.isConnected || currentSeat.consecutiveTimeouts >= 2);
+    const durationMs = isFastTimeout ? 8000 : 30000;
+
+    table.turnDurationSeconds = Math.round(durationMs / 1000);
+    table.turnDeadline = Date.now() + durationMs;
 
     table.turnTimer = setTimeout(() => {
-      this.handleTurnTimeout(table);
-    }, 30000);
+      this.enqueueTableAction(table.id, () => {
+        try {
+          this.handleTurnTimeout(table);
+        } catch (err) {
+          console.error('Turn timeout hatası:', err);
+        }
+      });
+    }, durationMs);
   }
 
   /**
-   * 30 saniye dolduğunda:
+   * Hamle süresi dolduğunda:
    * 1. Oyuncu henüz kağıt çekmediyse ortadan 1 kağıt çeker
    * 2. Per olmayan ve Joker olmayan en büyük gereksiz kağıdı otomatik atar
    */
@@ -568,10 +819,13 @@ export class TableManager {
     const currentSeat = table.seats[table.currentTurnSeat];
     if (!currentSeat || currentSeat.isEliminated) return;
 
+    currentSeat.consecutiveTimeouts += 1;
+
     // 1. Kağıt çekmediyse ortadan çek
     if (!table.hasDrawnThisTurn && table.drawPile.length > 0) {
       const drawn = table.drawPile.shift()!;
       currentSeat.hand.push(drawn);
+      this.syncSeatHandRows(currentSeat);
       table.hasDrawnThisTurn = true;
     }
 
@@ -590,52 +844,58 @@ export class TableManager {
    * Oyuncunun ortadaki kapalı desteden kağıt çekmesi
    */
   drawFromDeck(userId: string, tableId: string) {
-    const table = this.tables.get(tableId);
-    if (!table || table.status !== 'playing') {
-      throw new Error('Şu anda kağıt çekilemez.');
-    }
-    const currentSeat = table.seats[table.currentTurnSeat];
-    if (!currentSeat || currentSeat.userId !== userId) {
-      throw new Error('Sıra sizde değil.');
-    }
-    if (table.hasDrawnThisTurn) {
-      throw new Error('Bu turda zaten kağıt çektiniz. Şimdi bir kağıt atmalısınız.');
-    }
-    if (table.drawPile.length === 0) {
-      throw new Error('Ortada çekilecek kağıt kalmadı.');
-    }
+    return this.enqueueTableAction(tableId, () => {
+      const table = this.tables.get(tableId);
+      if (!table || table.status !== 'playing') {
+        throw new Error('Şu anda kağıt çekilemez.');
+      }
+      const currentSeat = table.seats[table.currentTurnSeat];
+      if (!currentSeat || currentSeat.userId !== userId) {
+        throw new Error('Sıra sizde değil.');
+      }
+      if (table.hasDrawnThisTurn) {
+        throw new Error('Bu turda zaten kağıt çektiniz. Şimdi bir kağıt atmalısınız.');
+      }
+      if (table.drawPile.length === 0) {
+        throw new Error('Ortada çekilecek kağıt kalmadı.');
+      }
 
-    const drawn = table.drawPile.shift()!;
-    currentSeat.hand.push(drawn);
-    table.hasDrawnThisTurn = true;
+      currentSeat.consecutiveTimeouts = 0;
+      const drawn = table.drawPile.shift()!;
+      currentSeat.hand.push(drawn);
+      this.syncSeatHandRows(currentSeat);
+      table.hasDrawnThisTurn = true;
 
-    this.io.to(`table:${table.id}`).emit('player_drew_card', {
-      userId: currentSeat.userId,
-      seatIndex: currentSeat.seatIndex,
-      remainingDeckCount: table.drawPile.length,
+      this.io.to(`table:${table.id}`).emit('player_drew_card', {
+        userId: currentSeat.userId,
+        seatIndex: currentSeat.seatIndex,
+        remainingDeckCount: table.drawPile.length,
+      });
+
+      this.broadcastTableState(table.id);
     });
-
-    this.sendTableStateToUser(table, userId);
-    this.broadcastTableState(table.id);
   }
 
   /**
    * Oyuncunun elinden yere kağıt atması
    */
   discardCard(userId: string, tableId: string, cardId: string) {
-    const table = this.tables.get(tableId);
-    if (!table || table.status !== 'playing') {
-      throw new Error('Şu anda kağıt atılamaz.');
-    }
-    const currentSeat = table.seats[table.currentTurnSeat];
-    if (!currentSeat || currentSeat.userId !== userId) {
-      throw new Error('Sıra sizde değil.');
-    }
-    if (!table.hasDrawnThisTurn) {
-      throw new Error('Kağıt atmadan önce ortadaki desteden kağıt çekmelisiniz!');
-    }
+    return this.enqueueTableAction(tableId, () => {
+      const table = this.tables.get(tableId);
+      if (!table || table.status !== 'playing') {
+        throw new Error('Şu anda kağıt atılamaz.');
+      }
+      const currentSeat = table.seats[table.currentTurnSeat];
+      if (!currentSeat || currentSeat.userId !== userId) {
+        throw new Error('Sıra sizde değil.');
+      }
+      if (!table.hasDrawnThisTurn) {
+        throw new Error('Kağıt atmadan önce ortadaki desteden kağıt çekmelisiniz!');
+      }
 
-    this.executeDiscard(table, currentSeat, cardId);
+      currentSeat.consecutiveTimeouts = 0;
+      this.executeDiscard(table, currentSeat, cardId);
+    });
   }
 
   private executeDiscard(table: GameTable, seat: SeatPlayer, cardId: string) {
@@ -645,6 +905,7 @@ export class TableManager {
     }
 
     const [discarded] = seat.hand.splice(idx, 1);
+    this.syncSeatHandRows(seat);
     table.discardPile.push(discarded);
 
     this.io.to(`table:${table.id}`).emit('card_discarded', {
@@ -656,7 +917,7 @@ export class TableManager {
 
     // Ortadaki çekilecek kağıtlar bitti ve kimse açmadıysa herkes elindeki sayıyı yer!
     if (table.drawPile.length === 0) {
-      this.endRound(table, null);
+      this.endRound(table, null, null);
       return;
     }
 
@@ -668,81 +929,189 @@ export class TableManager {
   }
 
   /**
-   * Oyuncunun "EL AÇ / BİTİR" yapması (11 kağıttan 1'ini yere atıp kalan 10 kağıdın tamamının per olması)
+   * Oyuncunun "EL AÇ / BİTİR" yapması:
+   * - Yardımlı Modda (`table.isAssisted === true`): Geçersizse uyarı verir, oyuncuyu yakmaz.
+   * - Yardımsız Modda (`table.isAssisted === false`): Oyuncunun 3 sıradaki dizilimini ve 10 kağıdını kontrol eder.
+   *   Eğer hatalı el açarsa oyuncu DİREKT YANAR (101+) ve bu oyun için RE-BUY (yeniden giriş) hakkını tamamen kaybeder!
    */
-  declareFinish(userId: string, tableId: string, discardCardId?: string) {
-    const table = this.tables.get(tableId);
-    if (!table || table.status !== 'playing') {
-      throw new Error('Oyun aktif değil.');
-    }
-    const currentSeat = table.seats[table.currentTurnSeat];
-    if (!currentSeat || currentSeat.userId !== userId) {
-      throw new Error('Sadece sırası gelen oyuncu el açabilir.');
-    }
-    if (!table.hasDrawnThisTurn || currentSeat.hand.length !== 11) {
-      throw new Error('El açmak için önce ortadan kağıt çekmiş olmalısınız (11 kağıt).');
-    }
+  declareFinish(
+    userId: string,
+    tableId: string,
+    discardCardId?: string,
+    rowCardIds?: string[][]
+  ) {
+    return this.enqueueTableAction(tableId, () => {
+      const table = this.tables.get(tableId);
+      if (!table || table.status !== 'playing') {
+        throw new Error('Oyun aktif değil.');
+      }
+      const currentSeat = table.seats[table.currentTurnSeat];
+      if (!currentSeat || currentSeat.userId !== userId) {
+        throw new Error('Sadece sırası gelen oyuncu el açabilir.');
+      }
+      if (!table.hasDrawnThisTurn || currentSeat.hand.length !== 11) {
+        throw new Error('El açmak için önce ortadan kağıt çekmiş olmalısınız (11 kağıt).');
+      }
 
-    let chosenDiscard: Card | null = null;
-    let remaining10: Card[] = [];
+      currentSeat.consecutiveTimeouts = 0;
 
-    if (discardCardId) {
-      const idx = currentSeat.hand.findIndex((c) => c.id === discardCardId);
-      if (idx !== -1) {
-        const candidate10 = currentSeat.hand.filter((_, i) => i !== idx);
-        const eval10 = evaluateHandOptimal(candidate10, table.wildRank);
-        if (eval10.canFinish) {
-          chosenDiscard = currentSeat.hand[idx];
-          remaining10 = eval10.orderedCards;
+      if (rowCardIds && Array.isArray(rowCardIds) && rowCardIds.length === 3) {
+        currentSeat.handRows = rowCardIds;
+        this.syncSeatHandRows(currentSeat);
+      }
+
+      if (table.isAssisted) {
+        // YARDIMLI MOD: Otomatik kontrol
+        let chosenDiscard: Card | null = null;
+        let remaining10: Card[] = [];
+
+        if (discardCardId) {
+          const idx = currentSeat.hand.findIndex((c) => c.id === discardCardId);
+          if (idx !== -1) {
+            const candidate10 = currentSeat.hand.filter((_, i) => i !== idx);
+            const eval10 = evaluateHandOptimal(candidate10, table.wildRank);
+            if (eval10.canFinish) {
+              chosenDiscard = currentSeat.hand[idx];
+              remaining10 = eval10.orderedCards;
+            }
+          }
+        }
+
+        if (!chosenDiscard) {
+          for (let i = 0; i < currentSeat.hand.length; i++) {
+            const candidate10 = currentSeat.hand.filter((_, idx) => idx !== i);
+            const eval10 = evaluateHandOptimal(candidate10, table.wildRank);
+            if (eval10.canFinish) {
+              chosenDiscard = currentSeat.hand[i];
+              remaining10 = eval10.orderedCards;
+              break;
+            }
+          }
+        }
+
+        if (!chosenDiscard) {
+          throw new Error(
+            'Elinizdeki 10 kağıdın tamamı geçerli per oluşturmuyor! Açmak için boşta kağıt kalmamalıdır.'
+          );
+        }
+
+        currentSeat.hand = remaining10;
+        this.syncSeatHandRows(currentSeat);
+        table.discardPile.push(chosenDiscard);
+        this.endRound(table, currentSeat.userId, null);
+        return;
+      }
+
+      // YARDIMSIZ (USTA) MOD:
+      // Atılacak kağıt seçilmiş olmalı (veya yoksa eldeki son kağıt atılır)
+      let discardIdx = discardCardId
+        ? currentSeat.hand.findIndex((c) => c.id === discardCardId)
+        : -1;
+      if (discardIdx === -1) {
+        // Seçilmediyse 11 kağıt içinden en uygun adayı veya son kağıdı seç
+        const winCheck = findWinningDiscard(currentSeat.hand, table.wildRank);
+        if (winCheck.canWin && winCheck.discardCard) {
+          discardIdx = currentSeat.hand.findIndex((c) => c.id === winCheck.discardCard!.id);
+        } else {
+          discardIdx = currentSeat.hand.length - 1;
         }
       }
-    }
 
-    // Eğer belirli bir kağıt seçilmediyse veya seçilenle bitmiyorsa, 11 kağıttan hangisi atılınca bittiğini otomatik bul
-    if (!chosenDiscard) {
-      for (let i = 0; i < currentSeat.hand.length; i++) {
-        const candidate10 = currentSeat.hand.filter((_, idx) => idx !== i);
-        const eval10 = evaluateHandOptimal(candidate10, table.wildRank);
-        if (eval10.canFinish) {
-          chosenDiscard = currentSeat.hand[i];
-          remaining10 = eval10.orderedCards;
-          break;
+      const chosenDiscard = currentSeat.hand[discardIdx];
+      const remaining10 = currentSeat.hand.filter((_, i) => i !== discardIdx);
+      currentSeat.hand = remaining10;
+      this.syncSeatHandRows(currentSeat);
+      table.discardPile.push(chosenDiscard);
+
+      // Oyuncunun 3 sıradaki dizilimini ve 10 kağıdını doğrula
+      const cardMap = new Map(remaining10.map((c) => [c.id, c]));
+      let rowsValid = true;
+      const activeRows = (currentSeat.handRows || []).filter((r) => r.length > 0);
+      if (activeRows.length > 0) {
+        for (const rIds of activeRows) {
+          const rowCards = rIds
+            .map((id) => cardMap.get(id))
+            .filter((c): c is Card => c !== undefined);
+          if (rowCards.length > 0) {
+            const rowEval = evaluateHandOptimal(rowCards, table.wildRank);
+            if (rowEval.unmelded.length > 0) {
+              rowsValid = false;
+              break;
+            }
+          }
         }
       }
-    }
 
-    if (!chosenDiscard) {
-      throw new Error(
-        'Elinizdeki 10 kağıdın tamamı geçerli per oluşturmuyor! Açmak için boşta kağıt kalmamalıdır.'
-      );
-    }
+      const fullEval10 = evaluateHandOptimal(remaining10, table.wildRank);
+      const isValidDeclare = fullEval10.canFinish && rowsValid;
 
-    // Atılan kağıdı ıskartaya koy ve eli bitir
-    currentSeat.hand = remaining10;
-    table.discardPile.push(chosenDiscard);
-
-    this.endRound(table, currentSeat.userId);
+      if (isValidDeclare) {
+        // Başarılı El Açma!
+        this.endRound(table, currentSeat.userId, null);
+      } else {
+        // HATALI EL AÇMA CEZASI!
+        // Oyuncu direkt yanar ve bu maç için Re-buy (tekrar para yatırıp dahil olma) hakkını kaybeder!
+        currentSeat.forfeitedRebuy = true;
+        this.io.to(`table:${table.id}`).emit('false_declare_penalty', {
+          userId: currentSeat.userId,
+          username: currentSeat.username,
+          message: `${currentSeat.username} Yardımsız Modda HATALI EL AÇTI! Direkt yandı ve yeniden giriş (Re-buy) hakkını kaybetti!`,
+        });
+        this.endRound(table, null, currentSeat.userId);
+      }
+    });
   }
 
   /**
-   * El sonu puan hesaplama, Açık El Gösterimi (Showdown), 101 Yanma ve Re-buy kontrolü
+   * El sonu puan hesaplama, Şeffaf Sıralı Açık El Gösterimi (Showdown), 101 Yanma ve Re-buy kontrolü
+   * - İlk 10 saniye: Eli açan oyuncunun kağıtları masada herkese gösterilir.
+   * - Sonrasında: Diğer oyuncuların elleri saat yönünde sırayla (kişi başı 3.5 sn) açılır ve ceza puanları işlenir.
    */
-  private endRound(table: GameTable, finisherUserId: string | null) {
+  private endRound(
+    table: GameTable,
+    finisherUserId: string | null,
+    falseDeclarerUserId: string | null = null
+  ) {
     if (table.turnTimer) clearTimeout(table.turnTimer);
 
     const activePlayers = table.seats.filter(
       (s): s is SeatPlayer => s !== null && !s.isEliminated
     );
 
+    // Saat yönünde (seatIndex sırasına göre) sıralama:
+    // Eli açan (veya hatalı açan) oyuncu 1. sırada (0-10 sn), diğerleri saat yönünde peşinden gelir
+    const leadUserId = finisherUserId || falseDeclarerUserId;
+    const leadSeat =
+      activePlayers.find((p) => p.userId === leadUserId)?.seatIndex ?? table.currentTurnSeat;
+
+    const orderedPlayers = [...activePlayers].sort((a, b) => {
+      const distA = (a.seatIndex - leadSeat + table.maxPlayers) % table.maxPlayers;
+      const distB = (b.seatIndex - leadSeat + table.maxPlayers) % table.maxPlayers;
+      return distA - distB;
+    });
+
     const scoresByUser: Record<string, number> = {};
     const totalsByUser: Record<string, number> = {};
     const showdownResults: ShowdownPlayerResult[] = [];
 
-    // Önce herkesin bu eldeki cezasını ve yeni toplam puanını hesapla
-    for (const player of activePlayers) {
+    const hasLeadShowcase = Boolean(leadUserId);
+    const openerShowcaseMs = hasLeadShowcase ? 10000 : 0;
+    const perOpponentRevealMs = 3500;
+
+    for (let idx = 0; idx < orderedPlayers.length; idx++) {
+      const player = orderedPlayers[idx];
       const evalHand = evaluateHandOptimal(player.hand, table.wildRank);
       const isFinisher = player.userId === finisherUserId;
-      const roundPenalty = isFinisher ? 0 : evalHand.penalty;
+      const isFalseDeclarer = player.userId === falseDeclarerUserId;
+
+      let roundPenalty = 0;
+      if (falseDeclarerUserId) {
+        // Bir oyuncu hatalı el açtıysa: Sadece hatalı açan oyuncu yanar (101 ceza), diğer oyuncular 0 ceza alır
+        roundPenalty = isFalseDeclarer ? 101 : 0;
+      } else {
+        roundPenalty = isFinisher ? 0 : evalHand.penalty;
+      }
+
       const prevScore = player.totalScore;
       const newTotal = prevScore + roundPenalty;
 
@@ -750,15 +1119,36 @@ export class TableManager {
       scoresByUser[player.userId] = roundPenalty;
       totalsByUser[player.userId] = newTotal;
 
-      const burnedThisRound = newTotal >= 101;
+      const burnedThisRound = newTotal >= 101 || isFalseDeclarer;
       if (burnedThisRound) {
         player.isEliminated = true;
       }
+      if (isFalseDeclarer) {
+        player.forfeitedRebuy = true;
+      }
+
+      // Zamanlama:
+      // idx === 0 ve leadUserId varsa -> 0ms'de başlar, 10000ms sürer (10 saniye masada görülür)
+      // Diğer oyuncular -> 10000ms + (idx - 1) * 3500ms'de sırayla saat yönünde açılır
+      const revealStartMs =
+        hasLeadShowcase && idx === 0
+          ? 0
+          : hasLeadShowcase
+          ? openerShowcaseMs + (idx - 1) * perOpponentRevealMs
+          : idx * perOpponentRevealMs;
+      const revealDurationMs = hasLeadShowcase && idx === 0 ? openerShowcaseMs : perOpponentRevealMs;
 
       showdownResults.push({
         userId: player.userId,
         username: player.username,
         avatar: player.avatar,
+        seatIndex: player.seatIndex,
+        isFinisher,
+        isFalseDeclarer,
+        forfeitedRebuy: player.forfeitedRebuy,
+        revealOrder: idx,
+        revealStartMs,
+        revealDurationMs,
         melds: evalHand.melds,
         unmelded: isFinisher ? [] : evalHand.unmelded,
         roundPenalty,
@@ -775,8 +1165,10 @@ export class TableManager {
     // Eğer herkes aynı anda 101'i geçtiyse (örneğin deste bittiğinde), en düşük puana sahip olan elenmemiş sayılır
     const survivors = activePlayers.filter((p) => !p.isEliminated);
     if (survivors.length === 0 && activePlayers.length > 0) {
-      activePlayers.sort((a, b) => a.totalScore - b.totalScore);
-      const bestPlayer = activePlayers[0];
+      const eligible = activePlayers.filter((p) => !p.forfeitedRebuy);
+      const pool = eligible.length > 0 ? eligible : activePlayers;
+      pool.sort((a, b) => a.totalScore - b.totalScore);
+      const bestPlayer = pool[0];
       bestPlayer.isEliminated = false;
       survivors.push(bestPlayer);
       const sd = showdownResults.find((s) => s.userId === bestPlayer.userId);
@@ -788,21 +1180,23 @@ export class TableManager {
       survivors.length > 0 ? Math.max(...survivors.map((s) => s.totalScore)) : 0;
 
     // KURAL: Son 2 oyuncu kaldığında yanan oyuncu geri dönemez!
-    // Yani el başında 2 kişi oynuyorsa ve biri yandıysa kazanan belli olmuştur.
-    // El başında 3 veya daha fazla kişi varsa (veya hala en az 2 kişi hayattaysa) yanan oyuncular Re-buy yapabilir.
+    // Ayrıca Yardımsız Modda hatalı el açan oyuncu (`forfeitedRebuy = true`) ASLA Re-buy yapamaz!
     const rebuyAllowedInThisRound =
       table.activePlayersAtRoundStart > 2 || survivors.length >= 2;
 
     let anyAwaitingRebuy = false;
     for (const sd of showdownResults) {
-      if (sd.burnedThisRound && rebuyAllowedInThisRound) {
+      const seat = table.seats.find((s) => s?.userId === sd.userId);
+      if (
+        sd.burnedThisRound &&
+        rebuyAllowedInThisRound &&
+        seat &&
+        !seat.forfeitedRebuy
+      ) {
         sd.canRebuy = true;
         sd.rebuyTargetScore = worstSurvivorScore;
-        const seat = table.seats.find((s) => s?.userId === sd.userId);
-        if (seat) {
-          seat.awaitingRebuyDecision = true;
-          anyAwaitingRebuy = true;
-        }
+        seat.awaitingRebuyDecision = true;
+        anyAwaitingRebuy = true;
       }
     }
 
@@ -811,25 +1205,45 @@ export class TableManager {
       scoresByUser,
       totalsByUser,
       finisherUserId,
+      falseDeclarerUserId,
     });
+
+    const othersCount = hasLeadShowcase
+      ? Math.max(0, orderedPlayers.length - 1)
+      : orderedPlayers.length;
+    const totalRevealMs = openerShowcaseMs + othersCount * perOpponentRevealMs;
+    const decisionBufferMs = anyAwaitingRebuy ? 10000 : 5000;
+    const waitMs = Math.max(12000, totalRevealMs + decisionBufferMs);
 
     table.status = 'round_summary';
     table.lastShowdown = showdownResults;
-    // Sonraki el veya Re-buy karar süresi: Re-buy varsa 15 sn, yoksa 8 sn açık elleri göster
-    const waitMs = anyAwaitingRebuy ? 15000 : 8000;
+    table.lastFinisherUserId = finisherUserId;
+    table.lastFalseDeclarerUserId = falseDeclarerUserId;
+    table.showdownStartedAt = Date.now();
+    table.showdownTotalMs = waitMs;
+    table.turnDurationSeconds = Math.ceil(waitMs / 1000);
     table.turnDeadline = Date.now() + waitMs;
 
     this.io.to(`table:${table.id}`).emit('round_ended', {
       roundNumber: table.roundNumber,
       finisherUserId,
+      falseDeclarerUserId,
       showdown: showdownResults,
+      openerShowcaseMs,
+      perOpponentRevealMs,
       waitMs,
     });
 
     this.broadcastTableState(table.id);
 
     table.phaseTimer = setTimeout(() => {
-      this.proceedAfterRoundSummary(table);
+      this.enqueueTableAction(table.id, () => {
+        try {
+          this.proceedAfterRoundSummary(table);
+        } catch (err) {
+          console.error('Round summary geçiş hatası:', err);
+        }
+      });
     }, waitMs);
   }
 
@@ -837,61 +1251,78 @@ export class TableManager {
    * 101 olup yanan oyuncunun "Yeniden Oyuna Gir (1x, 2x, 3x...)" işlemi
    */
   async rebuyIntoMatch(userId: string, tableId: string): Promise<void> {
-    const table = this.tables.get(tableId);
-    if (!table || table.status !== 'round_summary') {
-      throw new Error('Şu anda yeniden giriş (re-buy) yapılamaz.');
-    }
-
-    const seat = table.seats.find((s) => s?.userId === userId);
-    if (!seat || !seat.isEliminated || !seat.awaitingRebuyDecision) {
-      throw new Error('Yeniden giriş hakkınız bulunmuyor.');
-    }
-
-    const multiplier = seat.rebuyCount + 1; // 1. giriş: 1x, 2. giriş: 2x, 3. giriş: 3x...
-    const cost = multiplier * table.entryFee;
-
-    const survivors = table.seats.filter(
-      (s): s is SeatPlayer => s !== null && !s.isEliminated
-    );
-    const targetScore =
-      survivors.length > 0 ? Math.max(...survivors.map((s) => s.totalScore)) : 0;
-
-    // Krediyi düş ve Masanın Ödül Havuzuna (Pot) ekle
-    const newBalance = await db.adjustCredits(
-      userId,
-      -cost,
-      'table_rebuy',
-      `${table.name} masası ${multiplier}x yeniden oyuna giriş (Re-buy)`
-    );
-
-    this.emitBalanceUpdate(userId, newBalance);
-
-    table.pot += cost;
-    seat.rebuyCount += 1;
-    seat.totalScore = targetScore;
-    seat.isEliminated = false;
-    seat.awaitingRebuyDecision = false;
-
-    if (table.lastShowdown) {
-      const sd = table.lastShowdown.find((x) => x.userId === userId);
-      if (sd) {
-        sd.burnedThisRound = false;
-        sd.canRebuy = false;
-        sd.newTotalScore = targetScore;
+    return this.enqueueTableAction(tableId, async () => {
+      const table = this.tables.get(tableId);
+      if (!table || table.status !== 'round_summary') {
+        throw new Error('Şu anda yeniden giriş (re-buy) yapılamaz.');
       }
-    }
 
-    this.io.to(`table:${table.id}`).emit('player_rebought', {
-      userId: seat.userId,
-      username: seat.username,
-      multiplier,
-      cost,
-      newScore: targetScore,
-      newPot: table.pot,
+      const seat = table.seats.find((s) => s?.userId === userId);
+      if (!seat || !seat.isEliminated || !seat.awaitingRebuyDecision) {
+        throw new Error('Yeniden giriş hakkınız bulunmuyor.');
+      }
+      if (seat.forfeitedRebuy) {
+        throw new Error('Yardımsız modda hatalı el açtığınız için bu oyunda yeniden giriş hakkınızı kaybettiğiniz!');
+      }
+
+      // Senkron kilit: Çift tıklama ile çift tahsilatı önle
+      seat.awaitingRebuyDecision = false;
+
+      const multiplier = seat.rebuyCount + 1; // 1. giriş: 1x, 2. giriş: 2x, 3. giriş: 3x...
+      const cost = multiplier * table.entryFee;
+
+      const survivors = table.seats.filter(
+        (s): s is SeatPlayer => s !== null && !s.isEliminated
+      );
+      const targetScore =
+        survivors.length > 0 ? Math.max(...survivors.map((s) => s.totalScore)) : 0;
+
+      try {
+        const newBalance = await db.adjustCredits(
+          userId,
+          -cost,
+          'table_rebuy',
+          `${table.name} masası ${multiplier}x yeniden oyuna giriş (Re-buy)`
+        );
+        this.emitBalanceUpdate(userId, newBalance);
+      } catch (err) {
+        seat.awaitingRebuyDecision = true;
+        throw err;
+      }
+
+      table.pot += cost;
+      table.matchContributions[userId] = (table.matchContributions[userId] || 0) + cost;
+      seat.rebuyCount += 1;
+      seat.totalScore = targetScore;
+      seat.isEliminated = false;
+
+      try {
+        await db.upsertMatchEscrow(table.id, table.name, table.pot, table.matchContributions);
+      } catch (err) {
+        console.error('Rebuy escrow güncelleme hatası:', err);
+      }
+
+      if (table.lastShowdown) {
+        const sd = table.lastShowdown.find((x) => x.userId === userId);
+        if (sd) {
+          sd.burnedThisRound = false;
+          sd.canRebuy = false;
+          sd.newTotalScore = targetScore;
+        }
+      }
+
+      this.io.to(`table:${table.id}`).emit('player_rebought', {
+        userId: seat.userId,
+        username: seat.username,
+        multiplier,
+        cost,
+        newScore: targetScore,
+        newPot: table.pot,
+      });
+
+      this.broadcastTableState(table.id);
+      this.broadcastLobbyTables();
     });
-
-    this.broadcastTableState(table.id);
-    this.broadcastLobbyTables();
   }
 
   private proceedAfterRoundSummary(table: GameTable) {
@@ -913,7 +1344,7 @@ export class TableManager {
   }
 
   /**
-   * Oyun sonu: Kasa %5 komisyon alır, %95 kazanan oyuncuya aktarılır!
+   * Oyun sonu: Kasa %5 komisyon alır, %95 kazanan oyuncuya atomik işlemle aktarılır!
    */
   private async concludeMatch(table: GameTable) {
     if (table.turnTimer) clearTimeout(table.turnTimer);
@@ -930,20 +1361,27 @@ export class TableManager {
 
     table.status = 'finished';
     table.pot = 0;
+    table.matchContributions = {};
 
     for (const s of table.seats) {
-      if (s) s.isReady = false;
+      if (s) {
+        s.isReady = false;
+        // Bağlantısı kopmuş olan oyuncuları maç bittiğinde koltuktan temizle
+        if (!s.isConnected) {
+          table.seats[s.seatIndex] = null;
+        }
+      }
     }
 
     if (winner && totalPot > 0) {
       try {
-        const newBal = await db.adjustCredits(
+        const newBal = await db.settleMatchVictory(
+          table.id,
           winner.userId,
           prizeWon,
-          'table_win',
+          houseRake,
           `${table.name} masası şampiyonluk ödülü (%95 Pot)`
         );
-        await db.addVaultRake(houseRake);
         this.emitBalanceUpdate(winner.userId, newBal);
 
         table.lastWinnerInfo = {
@@ -959,25 +1397,72 @@ export class TableManager {
       } catch (err) {
         console.error('Ödül dağıtım hatası:', err);
       }
+    } else {
+      await db.clearMatchEscrow(table.id);
     }
 
-    this.broadcastTableState(table.id);
+    const deleted = this.cleanupTableIfEmpty(table.id);
+    if (!deleted) {
+      this.broadcastTableState(table.id);
+    }
     this.broadcastLobbyTables();
   }
 
   /**
-   * Oyuncunun elindeki kağıtları kendi istediği sıraya dizmesi veya "Otomatik Diz" yapması
+   * Oyuncunun elindeki kağıtları kendi istediği sıraya (veya 3 sıraya) dizmesi
    */
-  reorderPlayerHand(userId: string, tableId: string, orderedCardIds?: string[]) {
+  reorderPlayerHand(
+    userId: string,
+    tableId: string,
+    orderedCardIds?: string[],
+    rowCardIds?: string[][]
+  ) {
     const table = this.tables.get(tableId);
     if (!table) return;
     const seat = table.seats.find((s) => s?.userId === userId);
     if (!seat || seat.hand.length === 0) return;
 
-    if (!orderedCardIds || orderedCardIds.length === 0) {
-      // Otomatik Per Diz
-      const evalHand = evaluateHandOptimal(seat.hand, table.wildRank);
-      seat.hand = evalHand.orderedCards;
+    if (rowCardIds && Array.isArray(rowCardIds) && rowCardIds.length === 3) {
+      seat.handRows = rowCardIds;
+      this.syncSeatHandRows(seat);
+      const flatIds = seat.handRows.flat();
+      const map = new Map(seat.hand.map((c) => [c.id, c]));
+      const reordered: Card[] = [];
+      for (const id of flatIds) {
+        const c = map.get(id);
+        if (c) {
+          reordered.push(c);
+          map.delete(id);
+        }
+      }
+      for (const c of map.values()) reordered.push(c);
+      seat.hand = reordered;
+    } else if (!orderedCardIds || orderedCardIds.length === 0) {
+      if (!table.isAssisted) {
+        // Yardımsız modda otomatik per dizme kapalıdır, sadece sembol ve sayıya göre basit sıralar
+        const suitOrder: Record<string, number> = { S: 1, H: 2, C: 3, D: 4, J: 5 };
+        seat.hand.sort((a, b) => {
+          if (suitOrder[a.suit] !== suitOrder[b.suit]) {
+            return suitOrder[a.suit] - suitOrder[b.suit];
+          }
+          return a.rank - b.rank;
+        });
+        seat.handRows = this.splitHandIntoDefaultRows(seat.hand);
+      } else {
+        // Yardımlı modda Otomatik Per Diz: Her peri ayrı bir sıraya yerleştir!
+        const evalHand = evaluateHandOptimal(seat.hand, table.wildRank);
+        seat.hand = evalHand.orderedCards;
+        const newRows: string[][] = [[], [], []];
+        evalHand.melds.forEach((meld, idx) => {
+          const targetRow = Math.min(2, idx);
+          newRows[targetRow].push(...meld.map((c) => c.id));
+        });
+        for (const u of evalHand.unmelded) {
+          newRows[2].push(u.id);
+        }
+        seat.handRows = newRows;
+        this.syncSeatHandRows(seat);
+      }
     } else {
       const map = new Map(seat.hand.map((c) => [c.id, c]));
       const reordered: Card[] = [];
@@ -992,6 +1477,7 @@ export class TableManager {
         reordered.push(c);
       }
       seat.hand = reordered;
+      this.syncSeatHandRows(seat);
     }
 
     this.sendTableStateToUser(table, userId);
@@ -1008,6 +1494,9 @@ export class TableManager {
   ): Promise<void> {
     const table = this.tables.get(tableId);
     if (!table) throw new Error('Masa bulunamadı.');
+    if (!this.isUserInTable(senderId, tableId)) {
+      throw new Error('Bu masada değilsiniz.');
+    }
 
     const effect = INTERACTIVE_EFFECTS[effectKey] || INTERACTIVE_EFFECTS.clap;
     const vault = await db.getVaultSummary();
@@ -1038,11 +1527,8 @@ export class TableManager {
     });
   }
 
-  private emitBalanceUpdate(userId: string, credits: number) {
-    const sid = this.userSockets.get(userId);
-    if (sid) {
-      this.io.to(sid).emit('balance_updated', { credits });
-    }
+  emitBalanceUpdate(userId: string, credits: number) {
+    this.io.to(`user:${userId}`).emit('balance_updated', { credits });
   }
 
   /**
@@ -1063,35 +1549,48 @@ export class TableManager {
   }
 
   sendTableStateToUser(table: GameTable, viewerUserId: string) {
-    const sid = this.userSockets.get(viewerUserId);
-    if (!sid) return;
+    const sockets = this.userSockets.get(viewerUserId);
+    if (!sockets || sockets.size === 0) return;
 
     const viewerSeat = table.seats.find((s) => s?.userId === viewerUserId);
     let viewerEvaluation = null;
-    if (viewerSeat && viewerSeat.hand.length > 0) {
-      const evalRes = evaluateHandOptimal(viewerSeat.hand, table.wildRank);
-      const meldedIds = new Set(evalRes.melds.flat().map((c) => c.id));
-      let canFinishNow = evalRes.canFinish;
-      let winningDiscardCardId: string | null = null;
 
-      if (viewerSeat.hand.length === 11) {
-        const winCheck = findWinningDiscard(viewerSeat.hand, table.wildRank);
-        if (winCheck.canWin && winCheck.discardCard && winCheck.evaluation) {
-          canFinishNow = true;
-          winningDiscardCardId = winCheck.discardCard.id;
-          meldedIds.clear();
-          for (const c of winCheck.evaluation.melds.flat()) {
-            meldedIds.add(c.id);
+    if (viewerSeat && viewerSeat.hand.length > 0) {
+      this.syncSeatHandRows(viewerSeat);
+      if (table.isAssisted) {
+        // Sadece Yardımlı Modda otomatik per ve ceza ipuçlarını gönder
+        const evalRes = evaluateHandOptimal(viewerSeat.hand, table.wildRank);
+        const meldedIds = new Set(evalRes.melds.flat().map((c) => c.id));
+        let canFinishNow = evalRes.canFinish;
+        let winningDiscardCardId: string | null = null;
+
+        if (viewerSeat.hand.length === 11) {
+          const winCheck = findWinningDiscard(viewerSeat.hand, table.wildRank);
+          if (winCheck.canWin && winCheck.discardCard && winCheck.evaluation) {
+            canFinishNow = true;
+            winningDiscardCardId = winCheck.discardCard.id;
+            meldedIds.clear();
+            for (const c of winCheck.evaluation.melds.flat()) {
+              meldedIds.add(c.id);
+            }
           }
         }
-      }
 
-      viewerEvaluation = {
-        canFinish: canFinishNow,
-        winningDiscardCardId,
-        penalty: evalRes.penalty,
-        meldedCardIds: Array.from(meldedIds),
-      };
+        viewerEvaluation = {
+          canFinish: canFinishNow,
+          winningDiscardCardId,
+          penalty: evalRes.penalty,
+          meldedCardIds: Array.from(meldedIds),
+        };
+      } else {
+        // Yardımsız (Usta) Modda ipucu verilmez; oyuncu kendi elini kontrol edip açar
+        viewerEvaluation = {
+          canFinish: viewerSeat.hand.length === 11,
+          winningDiscardCardId: null,
+          penalty: -1,
+          meldedCardIds: [],
+        };
+      }
     }
 
     const payload = {
@@ -1102,7 +1601,8 @@ export class TableManager {
       minPlayers: table.minPlayers,
       maxPlayers: table.maxPlayers,
       entryFee: table.entryFee,
-      status: table.status,
+      isAssisted: table.isAssisted,
+      status: table.status === 'starting' ? 'playing' : table.status,
       pot: table.pot,
       roundNumber: table.roundNumber,
       drawPileCount: table.drawPile.length,
@@ -1110,6 +1610,7 @@ export class TableManager {
         table.discardPile.length > 0
           ? table.discardPile[table.discardPile.length - 1]
           : null,
+      discardHistory: table.discardPile.slice(-12),
       indicatorCard: table.indicatorCard,
       wildRank: table.wildRank,
       currentTurnSeat: table.currentTurnSeat,
@@ -1119,6 +1620,7 @@ export class TableManager {
         0,
         Math.ceil((table.turnDeadline - Date.now()) / 1000)
       ),
+      turnDurationSeconds: table.turnDurationSeconds,
       matchElapsedSeconds:
         table.matchStartedAt > 0
           ? Math.max(0, Math.floor((Date.now() - table.matchStartedAt) / 1000))
@@ -1134,18 +1636,27 @@ export class TableManager {
           isConnected: s.isConnected,
           totalScore: s.totalScore,
           isEliminated: s.isEliminated,
+          forfeitedRebuy: s.forfeitedRebuy,
           rebuyCount: s.rebuyCount,
           awaitingRebuyDecision: s.awaitingRebuyDecision,
           cardCount: s.hand.length,
         };
       }),
       myHand: viewerSeat ? viewerSeat.hand : [],
+      myHandRows: viewerSeat ? viewerSeat.handRows || [[], [], []] : [[], [], []],
       myEvaluation: viewerEvaluation,
       lastShowdown: table.lastShowdown,
+      lastFinisherUserId: table.lastFinisherUserId,
+      lastFalseDeclarerUserId: table.lastFalseDeclarerUserId,
+      showdownElapsedMs:
+        table.status === 'round_summary' && table.showdownStartedAt > 0
+          ? Math.max(0, Date.now() - table.showdownStartedAt)
+          : 0,
+      showdownTotalMs: table.showdownTotalMs,
       scoreHistory: table.scoreHistory,
       lastWinnerInfo: table.lastWinnerInfo,
     };
 
-    this.io.to(sid).emit('table_state', payload);
+    this.io.to(`user:${viewerUserId}`).emit('table_state', payload);
   }
 }
