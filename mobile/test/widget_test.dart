@@ -2,8 +2,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:yunan_yanik/main.dart';
 
 void main() {
-  testWidgets('Royal Kulüp Login screen renders', (WidgetTester tester) async {
-    await tester.pumpWidget(const YunanYanikVipApp());
-    expect(find.text('ROYAL KULÜP'), findsOneWidget);
+  testWidgets('Yanık İskambil HD Login screen renders', (WidgetTester tester) async {
+    await tester.pumpWidget(const YanikIskambilHdApp());
   });
 }

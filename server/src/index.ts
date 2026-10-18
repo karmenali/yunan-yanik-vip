@@ -47,6 +47,24 @@ function checkRateLimit(userId: string, action: string, minIntervalMs: number): 
   return true;
 }
 
+// 🛡️ Argo & Küfür Filtresi (Kök ve Kelime Eşleşmeli)
+const PROFANITY_ROOTS = [
+  'amk', 'aq', 'oç', 'oc', 'piç', 'pic', 'siktir', 'sik', 'sikerim', 'orospu', 
+  'göt', 'got', 'yarak', 'yarrak', 'ibne', 'kahpe', 'puşt', 'pust', 'pezevenk',
+  'amcık', 'amcik', 'yarram', 'taşak', 'tasak', 'fahişe', 'fahise', 'orospuçocuğu',
+  'sikik', 'sürtük', 'surtuk', 'mal', 'salak', 'aptal', 'şerefsiz', 'serefsiz'
+];
+
+function filterProfanity(text: string): string {
+  let cleaned = text;
+  for (const word of PROFANITY_ROOTS) {
+    const escaped = word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const regex = new RegExp(`\\b${escaped}\\b`, 'gi');
+    cleaned = cleaned.replace(regex, '***');
+  }
+  return cleaned;
+}
+
 // Auth Middleware
 async function requireAuth(req: Request, res: Response, next: NextFunction) {
   const authHeader = req.headers.authorization;
@@ -81,7 +99,7 @@ function requireAdmin(req: Request, res: Response, next: NextFunction) {
 app.get('/api/health', (_req, res) => {
   res.json({
     status: 'ok',
-    game: 'Yunan Yanık VIP Server',
+    game: 'Yanık İskambil HD Server',
     timestamp: new Date().toISOString(),
   });
 });
@@ -354,23 +372,27 @@ io.on('connection', (socket) => {
     socket.emit('lobby_tables', tableManager.getLobbyTablesSummary());
   });
 
-  // Yeni Masa Kurma (Min 2, Maks 6 Kişilik + Giriş Kredisi + Yardımlı/Yardımsız Mod)
+  // Yeni Oyun Odası Açma (Min 2, Maks 6 Kişilik + Giriş Kredisi + Yardımlı/Yardımsız Mod + Oynama Bekleme Süresi)
   socket.on('create_table', async (data, cb) => {
     try {
       const dbUser = await db.getUserById(user.userId);
       if (!dbUser) throw new Error('Kullanıcı bulunamadı.');
       const entryFee = Math.max(10, Number(data?.entryFee || 100));
       if (dbUser.credits < entryFee) {
-        throw new Error(`Bu masayı kurmak için en az ${entryFee} krediniz olmalıdır.`);
+        throw new Error(`Bu odayı açmak için en az ${entryFee} krediniz olmalıdır.`);
       }
       const isAssisted = data?.isAssisted !== undefined ? Boolean(data.isAssisted) : true;
+      const turnDuration = [15, 30, 45].includes(Number(data?.turnDurationSeconds))
+        ? Number(data.turnDurationSeconds)
+        : 30;
       const table = tableManager.createTable(
-        String(data?.name || `${dbUser.username} Masası`),
+        String(data?.name || `${dbUser.username} Odası`),
         dbUser.id,
         dbUser.username,
         Number(data?.maxPlayers || 4),
         entryFee,
-        isAssisted
+        isAssisted,
+        turnDuration
       );
       if (cb) cb({ ok: true, tableId: table.id });
     } catch (err: any) {
@@ -379,14 +401,51 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Masaya Giriş (Gezinme / İzleme)
+  // Test İçin Odaya Bot Oyuncu Ekleme
+  socket.on('add_bot', (data, cb) => {
+    try {
+      tableManager.addBotToTable(user.userId, String(data?.tableId));
+      if (cb) cb({ ok: true });
+    } catch (err: any) {
+      if (cb) cb({ ok: false, error: err.message });
+      else socket.emit('error_msg', err.message);
+    }
+  });
+
+  // Odadan Bot Oyuncuyu Çıkarma
+  socket.on('remove_bot', (data, cb) => {
+    try {
+      tableManager.removeBotFromTable(
+        user.userId,
+        String(data?.tableId),
+        Number(data?.seatIndex)
+      );
+      if (cb) cb({ ok: true });
+    } catch (err: any) {
+      if (cb) cb({ ok: false, error: err.message });
+      else socket.emit('error_msg', err.message);
+    }
+  });
+
+  // Oda Kurucusunun Oyunu Başlatması (En az 2 hazır oyuncu ile)
+  socket.on('start_game', async (data, cb) => {
+    try {
+      await tableManager.forceStartByHost(user.userId, String(data?.tableId));
+      if (cb) cb({ ok: true });
+    } catch (err: any) {
+      if (cb) cb({ ok: false, error: err.message });
+      else socket.emit('error_msg', err.message);
+    }
+  });
+
+  // Odaya Giriş (Gezinme / İzleme)
   socket.on('join_table', (data) => {
     if (data?.tableId) {
       tableManager.joinTableRoom(socket, user.userId, String(data.tableId));
     }
   });
 
-  // Masadan Çıkış
+  // Odadan Çıkış
   socket.on('leave_table', (data) => {
     if (data?.tableId) {
       tableManager.leaveTableRoom(socket, user.userId, String(data.tableId));
@@ -493,13 +552,15 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Masa İçi Yazılı Sohbet (Masa üyeliği + Rate limit korumalı)
+  // Oda İçi Yazılı Sohbet (Oda üyeliği + Karakter sınırı + Argo filtresi + Rate limit korumalı)
   socket.on('send_chat', async (data) => {
     const tableId = String(data?.tableId || '');
-    const text = String(data?.message || '').trim().slice(0, 200);
-    if (!tableId || !text) return;
+    const rawText = String(data?.message || '').trim().slice(0, 80); // Maksimum 80 karakter
+    if (!tableId || !rawText) return;
     if (!tableManager.isUserInTable(user.userId, tableId)) return;
     if (!checkRateLimit(user.userId, 'chat', 700)) return;
+
+    const filteredText = filterProfanity(rawText);
 
     const dbUser = await db.getUserById(user.userId);
     io.to(`table:${tableId}`).emit('chat_message', {
@@ -507,7 +568,7 @@ io.on('connection', (socket) => {
       userId: user.userId,
       username: dbUser?.username || user.username,
       avatar: dbUser?.avatar || 'lion',
-      message: text,
+      message: filteredText,
       timestamp: new Date().toISOString(),
     });
   });
@@ -558,7 +619,7 @@ io.on('connection', (socket) => {
 async function bootstrap() {
   await db.init();
   server.listen(PORT, '0.0.0.0', () => {
-    console.log(`🚀 Yunan Yanık VIP Oyun Sunucusu 0.0.0.0:${PORT} portunda çalışıyor!`);
+    console.log(`🚀 Yanık İskambil HD Oyun Sunucusu 0.0.0.0:${PORT} portunda çalışıyor!`);
   });
 }
 

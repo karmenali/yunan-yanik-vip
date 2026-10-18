@@ -138,6 +138,7 @@ class SeatPlayerModel {
   final int seatIndex;
   final bool isReady;
   final bool isConnected;
+  final bool isBot;
   final int totalScore;
   final bool isEliminated;
   final bool forfeitedRebuy;
@@ -152,6 +153,7 @@ class SeatPlayerModel {
     required this.seatIndex,
     required this.isReady,
     required this.isConnected,
+    this.isBot = false,
     required this.totalScore,
     required this.isEliminated,
     this.forfeitedRebuy = false,
@@ -168,6 +170,7 @@ class SeatPlayerModel {
       seatIndex: int.tryParse(json['seatIndex']?.toString() ?? '0') ?? 0,
       isReady: json['isReady'] == true,
       isConnected: json['isConnected'] != false,
+      isBot: json['isBot'] == true,
       totalScore: int.tryParse(json['totalScore']?.toString() ?? '0') ?? 0,
       isEliminated: json['isEliminated'] == true,
       forfeitedRebuy: json['forfeitedRebuy'] == true,
@@ -429,6 +432,7 @@ class LobbyTableModel {
   final int maxPlayers;
   final int entryFee;
   final bool isAssisted;
+  final int turnDurationSeconds;
   final String status;
   final int pot;
   final int roundNumber;
@@ -443,6 +447,7 @@ class LobbyTableModel {
     required this.maxPlayers,
     required this.entryFee,
     this.isAssisted = true,
+    this.turnDurationSeconds = 30,
     required this.status,
     required this.pot,
     required this.roundNumber,
@@ -460,6 +465,7 @@ class LobbyTableModel {
       maxPlayers: int.tryParse(json['maxPlayers']?.toString() ?? '4') ?? 4,
       entryFee: int.tryParse(json['entryFee']?.toString() ?? '100') ?? 100,
       isAssisted: json['isAssisted'] != false,
+      turnDurationSeconds: int.tryParse(json['turnDurationSeconds']?.toString() ?? '30') ?? 30,
       status: json['status']?.toString() ?? 'waiting',
       pot: int.tryParse(json['pot']?.toString() ?? '0') ?? 0,
       roundNumber: int.tryParse(json['roundNumber']?.toString() ?? '0') ?? 0,

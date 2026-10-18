@@ -1336,7 +1336,7 @@ class _TableScreenState extends State<TableScreen> {
         }
       },
       child: SizedBox(
-        width: 88,
+        width: 104,
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -1528,7 +1528,7 @@ class _TableScreenState extends State<TableScreen> {
             ),
             const SizedBox(height: 2),
             Container(
-              width: 86,
+              width: 100,
               padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2.5),
               decoration: BoxDecoration(
                 color: Colors.black.withValues(alpha: 0.82),
@@ -1544,7 +1544,11 @@ class _TableScreenState extends State<TableScreen> {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Text(
-                    isMe ? '${seat.username} (Sen)' : seat.username,
+                    seat.isBot
+                        ? '🤖 ${seat.username}'
+                        : isMe
+                            ? '${seat.username} (Sen)'
+                            : seat.username,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
@@ -1615,7 +1619,7 @@ class _TableScreenState extends State<TableScreen> {
             Text(
               mySeatIdx == -1
                   ? 'Oynamak için boş bir koltuğa dokunun.\nKoltuk: $seatedCount/${table.maxPlayers}'
-                  : 'Tüm koltuklar dolup herkes HAZIR olunca başlar.\nKoltuk: $seatedCount/${table.maxPlayers}  •  Hazır: $readyCount/${table.maxPlayers}',
+                  : 'En az 2 oyuncu olmalı.\nKoltuk: $seatedCount/${table.maxPlayers}  •  Hazır: $readyCount/$seatedCount',
               textAlign: TextAlign.center,
               style: const TextStyle(color: Colors.white70, fontSize: 10.5, height: 1.3),
             ),
@@ -1652,6 +1656,117 @@ class _TableScreenState extends State<TableScreen> {
                   ),
                 ),
               ),
+              if ((table.hostUsername.isEmpty ||
+                      table.hostUsername == gs.currentUser?.username ||
+                      mySeatIdx == 0) &&
+                  seatedCount >= 2 &&
+                  readyCount == seatedCount) ...[
+                const SizedBox(height: 6),
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton.icon(
+                    onPressed: () {
+                      SoundFx.playCardTap();
+                      gs.startGame(table.id);
+                    },
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF10B981),
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(vertical: 8),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                    ),
+                    icon: const Icon(Icons.rocket_launch, size: 16),
+                    label: const Text(
+                      'OYUNU BAŞLAT',
+                      style: TextStyle(
+                        fontWeight: FontWeight.w900,
+                        fontSize: 12,
+                        letterSpacing: 0.5,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+              if (table.hostUsername.isEmpty ||
+                  table.hostUsername == gs.currentUser?.username ||
+                  mySeatIdx == 0) ...[
+                const SizedBox(height: 4),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    if (seatedCount < table.maxPlayers)
+                      InkWell(
+                        onTap: () => gs.addBot(table.id),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 8, vertical: 4),
+                          decoration: BoxDecoration(
+                            color: Colors.white10,
+                            borderRadius: BorderRadius.circular(8),
+                            border: Border.all(
+                                color: const Color(0xFF67E8F9)
+                                    .withValues(alpha: 0.5)),
+                          ),
+                          child: const Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text('🤖', style: TextStyle(fontSize: 11)),
+                              SizedBox(width: 4),
+                              Text(
+                                'Bot Oyuncu Ekle',
+                                style: TextStyle(
+                                  color: Color(0xFF67E8F9),
+                                  fontSize: 10,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    if (table.seats.any((s) => s != null && s.isBot)) ...[
+                      const SizedBox(width: 6),
+                      InkWell(
+                        onTap: () {
+                          final bot = table.seats
+                              .firstWhere((s) => s != null && s.isBot);
+                          if (bot != null) {
+                            gs.removeBot(table.id, bot.seatIndex);
+                          }
+                        },
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 8, vertical: 4),
+                          decoration: BoxDecoration(
+                            color: Colors.red.withValues(alpha: 0.15),
+                            borderRadius: BorderRadius.circular(8),
+                            border: Border.all(
+                                color: Colors.redAccent.withValues(alpha: 0.5)),
+                          ),
+                          child: const Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(Icons.close,
+                                  color: Colors.redAccent, size: 11),
+                              SizedBox(width: 3),
+                              Text(
+                                'Bot Çıkar',
+                                style: TextStyle(
+                                  color: Colors.redAccent,
+                                  fontSize: 10,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ],
               InkWell(
                 onTap: () => gs.standUp(),
                 child: const Padding(
@@ -3556,10 +3671,16 @@ class _TableScreenState extends State<TableScreen> {
                     Expanded(
                       child: TextField(
                         controller: _chatCtrl,
+                        maxLength: 80,
+                        buildCounter: (context,
+                                {required currentLength,
+                                required isFocused,
+                                maxLength}) =>
+                            null,
                         style:
                             const TextStyle(color: Colors.white, fontSize: 12),
                         decoration: InputDecoration(
-                          hintText: 'Mesaj yaz...',
+                          hintText: 'Mesaj yaz (maks 80 karakter)...',
                           hintStyle: const TextStyle(color: Colors.white38),
                           filled: true,
                           fillColor: Colors.white10,

@@ -487,7 +487,7 @@ class GameService extends ChangeNotifier {
   }
 
   // ==========================================
-  // 🃏 MASA & OYUN AKSİYONLARI
+  // 🃏 ODA & OYUN AKSİYONLARI
   // ==========================================
 
   Future<String> createTable({
@@ -495,6 +495,7 @@ class GameService extends ChangeNotifier {
     required int maxPlayers,
     required int entryFee,
     bool isAssisted = true,
+    int turnDurationSeconds = 30,
   }) {
     final completer = Completer<String>();
     _socket?.emitWithAck(
@@ -504,16 +505,36 @@ class GameService extends ChangeNotifier {
         'maxPlayers': maxPlayers,
         'entryFee': entryFee,
         'isAssisted': isAssisted,
+        'turnDurationSeconds': turnDurationSeconds,
       },
       ack: (res) {
         if (res is Map && res['ok'] == true) {
           completer.complete(res['tableId'].toString());
         } else {
-          completer.completeError(res?['error'] ?? 'Masa kurulamadı.');
+          completer.completeError(res?['error'] ?? 'Oda açılamadı.');
         }
       },
     );
     return completer.future;
+  }
+
+  void addBot(String tableId) {
+    _socket?.emit('add_bot', {'tableId': tableId});
+  }
+
+  void removeBot(String tableId, int seatIndex) {
+    _socket?.emit('remove_bot', {
+      'tableId': tableId,
+      'seatIndex': seatIndex,
+    });
+  }
+
+  void startGame(String tableId) {
+    _socket?.emit('start_game', {'tableId': tableId});
+  }
+
+  void refreshLobbyTables() {
+    _socket?.emit('get_lobby_tables');
   }
 
   void enterTable(String tableId) {
@@ -594,9 +615,11 @@ class GameService extends ChangeNotifier {
 
   void sendChatMessage(String text) {
     if (activeTable == null || text.trim().isEmpty) return;
+    final clean = text.trim();
+    final truncated = clean.length > 80 ? clean.substring(0, 80) : clean;
     _socket?.emit('send_chat', {
       'tableId': activeTable!.id,
-      'message': text.trim(),
+      'message': truncated,
     });
   }
 

@@ -19,7 +19,7 @@ export interface HandEvaluation {
 }
 
 /**
- * 106 kağıtlık Yunan Yanık destesi oluşturur (2 x 52 kağıt + 2 Fiziksel Joker)
+ * 106 kağıtlık Yanık İskambil destesi oluşturur (2 x 52 kağıt + 2 Fiziksel Joker)
  */
 export function createDeck(): Card[] {
   const suits: Suit[] = ['S', 'H', 'D', 'C'];

@@ -18,7 +18,7 @@ function makeCard(id: string, suit: 'S' | 'H' | 'D' | 'C' | 'J', rank: number, i
   };
 }
 
-console.log('🧪 Yunan Yanık Oyun Motoru Testleri Başlatılıyor...');
+console.log('🧪 Yanık İskambil HD Oyun Motoru Testleri Başlatılıyor...');
 
 // 1. Deste Testi (106 Kağıt)
 const deck = createDeck();
@@ -113,4 +113,4 @@ const hand11 = [
 const autoDiscarded = selectBestAutoDiscard(hand11, 6);
 assert.strictEqual(autoDiscarded.id, '6', 'Otomatik atışta per olmayan ve joker olmayan en büyük kağıt (As = 11p) atılmalı');
 
-console.log('✅ Tüm Yunan Yanık Oyun Motoru Testleri %100 Başarıyla Geçti!');
+console.log('✅ Tüm Yanık İskambil HD Oyun Motoru Testleri %100 Başarıyla Geçti!');

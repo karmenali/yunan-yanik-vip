@@ -25,6 +25,7 @@ export interface SeatPlayer {
   rebuyCount: number; // Kaç kez yandı ve geri döndü (0 -> ilk yanışta 1x öder, 1 -> 2x öder, 2 -> 3x öder)
   awaitingRebuyDecision: boolean;
   consecutiveTimeouts: number;
+  isBot?: boolean;
   hand: Card[];
   handRows?: string[][]; // 3 sıralı ıstaka dizilimi
   openedMelds?: Card[][]; // Oyuncunun el açarken masaya serdiği gerçek per dizilimi
@@ -341,18 +342,20 @@ export class TableManager {
     hostUsername: string,
     maxPlayers: number,
     entryFee: number,
-    isAssisted = true
+    isAssisted = true,
+    turnDurationSeconds = 30
   ): GameTable {
     const clampedMax = Math.min(6, Math.max(2, Math.round(maxPlayers)));
     const cleanFee = Math.max(10, Math.round(entryFee));
+    const cleanTurn = [15, 30, 45].includes(turnDurationSeconds) ? turnDurationSeconds : 30;
     const id = uuidv4().slice(0, 8);
 
     const table: GameTable = {
       id,
-      name: name.trim() || `Masa #${id.slice(0, 4)}`,
+      name: name.trim() || `Oda #${id.slice(0, 4)}`,
       hostUserId,
       hostUsername,
-      minPlayers: clampedMax,
+      minPlayers: 2, // En az 2 oyuncu olunca başlatılabilir
       maxPlayers: clampedMax,
       entryFee: cleanFee,
       isAssisted: Boolean(isAssisted),
@@ -370,7 +373,7 @@ export class TableManager {
       dealerSeat: 0,
       hasDrawnThisTurn: false,
       turnDeadline: 0,
-      turnDurationSeconds: 30,
+      turnDurationSeconds: cleanTurn,
       matchStartedAt: 0,
       activePlayersAtRoundStart: 0,
       lastShowdown: null,
@@ -385,6 +388,73 @@ export class TableManager {
     this.tables.set(id, table);
     this.broadcastLobbyTables();
     return table;
+  }
+
+  addBotToTable(hostUserId: string, tableId: string): void {
+    const table = this.tables.get(tableId);
+    if (!table || table.status !== 'waiting') {
+      throw new Error('Şu anda odaya bot eklenemez.');
+    }
+    if (table.hostUserId !== hostUserId) {
+      throw new Error('Yalnızca oda kurucusu bot ekleyebilir.');
+    }
+    const emptySeatIdx = table.seats.findIndex((s) => s === null);
+    if (emptySeatIdx === -1) {
+      throw new Error('Odada boş koltuk kalmadı.');
+    }
+
+    const botId = `bot_${uuidv4().slice(0, 6)}`;
+    const botNames = ['Usta Bot 🤖', 'Zeki Bot 🤖', 'Çırak Bot 🤖', 'Yıldız Bot 🤖'];
+    const botName = botNames[emptySeatIdx % botNames.length];
+
+    const botPlayer: SeatPlayer = {
+      userId: botId,
+      username: botName,
+      avatar: 'joker',
+      seatIndex: emptySeatIdx,
+      isReady: true,
+      isConnected: true,
+      isBot: true,
+      totalScore: 0,
+      isEliminated: false,
+      forfeitedRebuy: false,
+      rebuyCount: 0,
+      awaitingRebuyDecision: false,
+      consecutiveTimeouts: 0,
+      hand: [],
+      handRows: [[], [], []],
+      sortMode: 'rank',
+    };
+
+    table.seats[emptySeatIdx] = botPlayer;
+    this.broadcastTableState(table.id);
+    this.broadcastLobbyTables();
+  }
+
+  removeBotFromTable(hostUserId: string, tableId: string, seatIndex: number): void {
+    const table = this.tables.get(tableId);
+    if (!table || table.status !== 'waiting') return;
+    if (table.hostUserId !== hostUserId) return;
+    const seat = table.seats[seatIndex];
+    if (seat && seat.isBot) {
+      table.seats[seatIndex] = null;
+      this.broadcastTableState(table.id);
+      this.broadcastLobbyTables();
+    }
+  }
+
+  async forceStartByHost(hostUserId: string, tableId: string): Promise<void> {
+    return this.enqueueTableAction(tableId, async () => {
+      const table = this.tables.get(tableId);
+      if (!table) throw new Error('Oda bulunamadı.');
+      if (table.status !== 'waiting') throw new Error('Oyun zaten başlamış.');
+      if (table.hostUserId !== hostUserId) throw new Error('Yalnızca oda kurucusu oyunu başlatabilir.');
+      const seated = table.seats.filter((s): s is SeatPlayer => s !== null);
+      if (seated.length < 2) throw new Error('Oyunu başlatmak için en az 2 oyuncu gereklidir.');
+      const unready = seated.filter((s) => !s.isReady);
+      if (unready.length > 0) throw new Error('Tüm oyuncular hazır olmalıdır.');
+      await this.startMatch(table);
+    });
   }
 
   async closeTableByAdmin(tableId: string): Promise<boolean> {
@@ -426,6 +496,7 @@ export class TableManager {
       maxPlayers: t.maxPlayers,
       entryFee: t.entryFee,
       isAssisted: t.isAssisted,
+      turnDurationSeconds: t.turnDurationSeconds || 30,
       status: t.status === 'starting' ? 'playing' : t.status,
       pot: t.pot,
       roundNumber: t.roundNumber,
@@ -437,6 +508,7 @@ export class TableManager {
           username: s.username,
           avatar: s.avatar,
           seatIndex: s.seatIndex,
+          isBot: Boolean(s.isBot),
         })),
     }));
   }
@@ -623,10 +695,10 @@ export class TableManager {
       seat.isReady = !seat.isReady;
       this.broadcastTableState(tableId);
 
-      // KURAL: Masadaki TÜM koltuklar (table.maxPlayers) dolup herkes HAZIR olduğunda oyun başlar!
+      // KURAL: Masadaki en az 2 oyuncu varsa ve TÜM oturan oyuncular HAZIR olduğunda oyun başlar!
       const seatedPlayers = table.seats.filter((s): s is SeatPlayer => s !== null);
       if (
-        seatedPlayers.length === table.maxPlayers &&
+        seatedPlayers.length >= 2 &&
         seatedPlayers.every((s) => s.isReady)
       ) {
         await this.startMatch(table);
@@ -637,7 +709,7 @@ export class TableManager {
   private async startMatch(table: GameTable): Promise<void> {
     if (table.status !== 'waiting') return;
     const seatedPlayers = table.seats.filter((s): s is SeatPlayer => s !== null);
-    if (seatedPlayers.length < table.maxPlayers) return;
+    if (seatedPlayers.length < 2) return;
 
     // Senkron kilit: Çift tahsilatı önlemek için durumu hemen 'starting' yap
     table.status = 'starting';
@@ -648,11 +720,16 @@ export class TableManager {
 
     try {
       for (const p of seatedPlayers) {
+        if (p.isBot) {
+          collectedPot += table.entryFee;
+          contributions[p.userId] = (contributions[p.userId] || 0) + table.entryFee;
+          continue;
+        }
         const newBal = await db.adjustCredits(
           p.userId,
           -table.entryFee,
           'table_entry',
-          `${table.name} masası oyun giriş ücreti (1x)`
+          `${table.name} odası oyun giriş ücreti (1x)`
         );
         chargedUsers.push(p.userId);
         collectedPot += table.entryFee;
@@ -796,10 +873,30 @@ export class TableManager {
     if (table.turnTimer) clearTimeout(table.turnTimer);
 
     const currentSeat = table.seats[table.currentTurnSeat];
+    if (!currentSeat || currentSeat.isEliminated) return;
+
+    // BOT OYUNCU HAMLESI: 1.5 sn sonra oyna
+    if (currentSeat.isBot) {
+      table.turnDurationSeconds = 15;
+      table.turnDeadline = Date.now() + 2500;
+      table.turnTimer = setTimeout(() => {
+        this.enqueueTableAction(table.id, async () => {
+          try {
+            await this.handleBotTurn(table, currentSeat);
+          } catch (err) {
+            console.error('Bot hamle hatası:', err);
+          }
+        });
+      }, 1500);
+      return;
+    }
+
     // Bağlantısı kopuk veya üst üste 2 kez süre aşımı yapan oyuncunun süresini 8 saniyeye düşür (Anti-Stall)
     const isFastTimeout =
-      currentSeat && (!currentSeat.isConnected || currentSeat.consecutiveTimeouts >= 2);
-    const durationMs = isFastTimeout ? 8000 : 30000;
+      !currentSeat.isConnected || currentSeat.consecutiveTimeouts >= 2;
+    const durationMs = isFastTimeout
+      ? 8000
+      : (table.turnDurationSeconds || 30) * 1000;
 
     table.turnDurationSeconds = Math.round(durationMs / 1000);
     table.turnDeadline = Date.now() + durationMs;
@@ -813,6 +910,47 @@ export class TableManager {
         }
       });
     }, durationMs);
+  }
+
+  private async handleBotTurn(table: GameTable, botSeat: SeatPlayer) {
+    if (table.status !== 'playing') return;
+    if (table.seats[table.currentTurnSeat]?.userId !== botSeat.userId) return;
+
+    // 1. Ortadan kağıt çek
+    if (!table.hasDrawnThisTurn && table.drawPile.length > 0) {
+      const drawn = table.drawPile.shift()!;
+      botSeat.hand.push(drawn);
+      this.syncSeatHandRows(botSeat);
+      table.hasDrawnThisTurn = true;
+
+      this.io.to(`table:${table.id}`).emit('player_drew_card', {
+        userId: botSeat.userId,
+        seatIndex: botSeat.seatIndex,
+        remainingDeckCount: table.drawPile.length,
+      });
+      this.broadcastTableState(table.id);
+    }
+
+    // 2. 800ms sonra el aç veya en uygun kağıdı at
+    setTimeout(() => {
+      this.enqueueTableAction(table.id, async () => {
+        if (table.status !== 'playing') return;
+        if (table.seats[table.currentTurnSeat]?.userId !== botSeat.userId) return;
+
+        // Bitiş kontrolü (Bot kazanabiliyorsa el açar)
+        const winningDiscard = findWinningDiscard(botSeat.hand, table.wildRank);
+        if (winningDiscard.canWin && winningDiscard.discardCard) {
+          try {
+            await this.declareFinish(botSeat.userId, table.id, winningDiscard.discardCard.id);
+            return;
+          } catch (_) {}
+        }
+
+        // Akıllı kağıt seçimi
+        const cardToDiscard = selectBestAutoDiscard(botSeat.hand, table.wildRank);
+        this.executeDiscard(table, botSeat, cardToDiscard.id);
+      });
+    }, 850);
   }
 
   /**
@@ -1373,14 +1511,18 @@ export class TableManager {
 
     if (winner && totalPot > 0) {
       try {
-        const newBal = await db.settleMatchVictory(
-          table.id,
-          winner.userId,
-          prizeWon,
-          houseRake,
-          `${table.name} masası şampiyonluk ödülü (%95 Pot)`
-        );
-        this.emitBalanceUpdate(winner.userId, newBal);
+        if (!winner.isBot) {
+          const newBal = await db.settleMatchVictory(
+            table.id,
+            winner.userId,
+            prizeWon,
+            houseRake,
+            `${table.name} odası şampiyonluk ödülü (%95 Pot)`
+          );
+          this.emitBalanceUpdate(winner.userId, newBal);
+        } else {
+          await db.clearMatchEscrow(table.id);
+        }
 
         table.lastWinnerInfo = {
           userId: winner.userId,
@@ -1745,6 +1887,7 @@ export class TableManager {
           seatIndex: s.seatIndex,
           isReady: s.isReady,
           isConnected: s.isConnected,
+          isBot: Boolean(s.isBot),
           totalScore: s.totalScore,
           isEliminated: s.isEliminated,
           forfeitedRebuy: s.forfeitedRebuy,

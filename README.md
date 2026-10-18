@@ -1,8 +1,8 @@
-# 🃏 Yunan Yanık VIP — Çok Oyunculu Mobil Oyun & Linux Sunucu
+# 🃏 Yanık İskambil HD — Çok Oyunculu Mobil Oyun & Linux Sunucu
 
-Özel kurallı **Yunan Yanık** çok oyunculu kart oyunu.
+Geleneksel kurallı **Yanık İskambil HD** çok oyunculu kart oyunu.
 * **Linux Oyun Sunucusu (`server/`):** Node.js (TypeScript) + Socket.IO + PostgreSQL (Docker Compose ile izole, mevcut Docker konteynerleriyle çakışmayan `4545` portu).
-* **Android Uygulaması (`mobile/`):** Flutter (Yatay Ekran / Landscape VIP Casino teması, Klasik Yelpaze kağıt dizilimi, Uygulama İçi Admin Paneli).
+* **Android Uygulaması (`mobile/`):** Flutter (VIP Casino teması, 3 sıralı ıstaka dizilimi, Uygulama İçi Admin Paneli, Bot Oyuncu desteği).
 
 ---
 

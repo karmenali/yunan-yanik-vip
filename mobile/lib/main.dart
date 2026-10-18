@@ -24,16 +24,16 @@ void main() async {
 
   await GameService.instance.init();
 
-  runApp(const YunanYanikVipApp());
+  runApp(const YanikIskambilHdApp());
 }
 
-class YunanYanikVipApp extends StatelessWidget {
-  const YunanYanikVipApp({super.key});
+class YanikIskambilHdApp extends StatelessWidget {
+  const YanikIskambilHdApp({super.key});
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'VIP Oyun Kulübü',
+      title: 'Yanık İskambil HD',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         brightness: Brightness.dark,
