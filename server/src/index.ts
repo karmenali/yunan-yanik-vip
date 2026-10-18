@@ -531,7 +531,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Bas-Konuş (Push-To-Talk) Sesli Sohbet Yayını (Telsiz / Walkie-Talkie)
+  // PUBG Tarzı Sürekli Canlı Sesli Sohbet (Continuous Live Voice Stream & Mic Durumu)
   socket.on('voice_ptt', (data) => {
     const tableId = String(data?.tableId || '');
     if (!tableId) return;
@@ -540,7 +540,7 @@ io.on('connection', (socket) => {
       typeof data?.audioBase64 === 'string' && data.audioBase64.length <= 1500000
         ? data.audioBase64
         : null;
-    if (audioBase64 && !checkRateLimit(user.userId, 'voice_clip', 800)) return;
+    if (audioBase64 && !checkRateLimit(user.userId, 'voice_clip', 150)) return;
 
     io.to(`table:${tableId}`).emit('voice_ptt_stream', {
       userId: user.userId,

@@ -25,6 +25,11 @@ class GameService extends ChangeNotifier {
   String? lastDrawnCardId;
   List<Map<String, dynamic>> tableChatMessages = [];
   String? activeVoiceSpeakerUsername;
+  final Set<String> activeSpeakingUserIds = {};
+  final Map<String, Timer> _speakerTimers = {};
+
+  bool get isVoiceMicOn => SoundFx.voiceMicEnabled;
+  bool get isVoiceListenOn => SoundFx.voiceListenEnabled;
 
   // Görsel uçan efekt, kart animasyonu & bildirim akışları
   final StreamController<Map<String, dynamic>> effectStreamController =
@@ -335,36 +340,37 @@ class GameService extends ChangeNotifier {
       if (data is Map) {
         final speaking = data['isSpeaking'] == true;
         final speakerName = data['username']?.toString();
-        final senderId = data['userId']?.toString();
+        final senderId = data['userId']?.toString() ?? '';
         final audioB64 = data['audioBase64']?.toString();
 
-        activeVoiceSpeakerUsername = speaking ? speakerName : null;
+        if (senderId.isNotEmpty) {
+          _speakerTimers[senderId]?.cancel();
+          if (speaking) {
+            activeSpeakingUserIds.add(senderId);
+            activeVoiceSpeakerUsername = speakerName;
+            _speakerTimers[senderId] = Timer(
+              const Duration(milliseconds: 1400),
+              () {
+                activeSpeakingUserIds.remove(senderId);
+                if (activeVoiceSpeakerUsername == speakerName) {
+                  activeVoiceSpeakerUsername = null;
+                }
+                notifyListeners();
+              },
+            );
+          } else {
+            activeSpeakingUserIds.remove(senderId);
+            if (activeVoiceSpeakerUsername == speakerName) {
+              activeVoiceSpeakerUsername = null;
+            }
+          }
+        }
 
         if (audioB64 != null && audioB64.isNotEmpty) {
           final isMe = senderId == currentUser?.id;
-          final seatedOthers = activeTable?.seats
-                  .where((s) => s != null && s.userId != currentUser?.id)
-                  .length ??
-              0;
-
-          if (!isMe || seatedOthers == 0) {
-            activeVoiceSpeakerUsername = speakerName;
-            if (isMe && seatedOthers == 0) {
-              toastStreamController.add(
-                '🔊 Ses Testi: Masada tek olduğunuz için sesiniz size dinletiliyor.',
-              );
-            }
-            Future.delayed(Duration(milliseconds: isMe ? 300 : 10), () {
-              SoundFx.playIncomingVoiceBase64(audioB64);
-            });
-            Future.delayed(const Duration(seconds: 4), () {
-              if (activeVoiceSpeakerUsername == speakerName) {
-                activeVoiceSpeakerUsername = null;
-                notifyListeners();
-              }
-            });
-          } else {
-            toastStreamController.add('🎙️ Sesli mesajınız masaya iletildi.');
+          // Diğer oyuncuların sesini anında oynat
+          if (!isMe) {
+            SoundFx.playIncomingVoiceBase64(audioB64);
           }
         }
 
@@ -391,6 +397,7 @@ class GameService extends ChangeNotifier {
     });
 
     _socket!.on('table_closed', (data) {
+      stopContinuousMic();
       activeTable = null;
       final msg = (data is Map && data['message'] != null)
           ? data['message'].toString()
@@ -472,6 +479,7 @@ class GameService extends ChangeNotifier {
   }
 
   void leaveCurrentTable() {
+    stopContinuousMic();
     if (activeTable != null) {
       _socket?.emit('leave_table', {'tableId': activeTable!.id});
       activeTable = null;
@@ -557,29 +565,65 @@ class GameService extends ChangeNotifier {
     });
   }
 
-  Future<bool> startVoicePushToTalk() async {
-    if (activeTable == null) return false;
-    final started = await SoundFx.startPttRecording();
-    if (started) {
-      _socket?.emit('voice_ptt', {
-        'tableId': activeTable!.id,
-        'isSpeaking': true,
-      });
-    } else {
-      toastStreamController.add('🎙️ Mikrofon izni gerekli veya sesli sohbet kapalı.');
+  /// 🔊 PUBG Tarzı Hoparlör (Dinle: Açık / Kapalı)
+  void toggleVoiceListen() {
+    final nextState = !SoundFx.voiceListenEnabled;
+    SoundFx.setVoiceListenEnabled(nextState);
+    if (!nextState && SoundFx.voiceMicEnabled) {
+      // Hoparlör tamamen kapatılırsa mikrofonu da kapat
+      stopContinuousMic();
     }
+    notifyListeners();
+  }
+
+  /// 🎙️ PUBG Tarzı Sürekli Açık Mikrofon (Konuş: Açık / Kapalı)
+  Future<bool> toggleContinuousMic() async {
+    if (activeTable == null) return false;
+    if (SoundFx.voiceMicEnabled) {
+      await stopContinuousMic();
+      return false;
+    }
+
+    // Mikrofon açıldığında hoparlörü de otomatik aç
+    if (!SoundFx.voiceListenEnabled) {
+      SoundFx.setVoiceListenEnabled(true);
+    }
+
+    final started = await SoundFx.startContinuousVoiceStream(
+      onVoicePacket: (audioBase64, isSpeaking) {
+        if (activeTable == null) return;
+        _socket?.emit('voice_ptt', {
+          'tableId': activeTable!.id,
+          'isSpeaking': isSpeaking,
+          'audioBase64': audioBase64,
+        });
+      },
+    );
+
+    if (!started) {
+      toastStreamController.add('🎙️ Mikrofon izni gerekli! Lütfen mikrofon iznini onaylayın.');
+    }
+    notifyListeners();
     return started;
   }
 
-  Future<void> stopVoicePushToTalk() async {
-    if (activeTable == null) return;
-    final audioB64 = await SoundFx.stopPttRecordingAndGetBase64();
-    _socket?.emit('voice_ptt', {
-      'tableId': activeTable!.id,
-      'isSpeaking': false,
-      'audioBase64': audioB64,
-    });
+  Future<void> stopContinuousMic() async {
+    final wasOn = SoundFx.voiceMicEnabled;
+    await SoundFx.stopContinuousVoiceStream();
+    if (wasOn && activeTable != null) {
+      _socket?.emit('voice_ptt', {
+        'tableId': activeTable!.id,
+        'isSpeaking': false,
+      });
+    }
+    if (currentUser != null) {
+      activeSpeakingUserIds.remove(currentUser!.id);
+    }
+    notifyListeners();
   }
+
+  Future<bool> startVoicePushToTalk() => toggleContinuousMic();
+  Future<void> stopVoicePushToTalk() => stopContinuousMic();
 
   // ==========================================
   // 👑 ADMİN PANELİ API ÇAĞRILARI

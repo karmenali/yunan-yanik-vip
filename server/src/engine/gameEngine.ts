@@ -170,16 +170,45 @@ export function isValidMeld(cards: Card[], wildRank: number): boolean {
 }
 
 /**
- * Bir seriyi görsel olarak doğru sıraya (jokerleri boşluklara yerleştirerek) dizer
+ * Bir seriyi görsel olarak doğru sıraya (jokerleri boşluklara yerleştirerek) dizer.
+ * Eğer oyuncu kağıtları zaten geçerli bir seri sırasıyla dizmişse (ör. 2♠ - Joker - Joker - 5♠),
+ * oyuncunun kendi dizilim sırasını birebir korur.
  */
 export function orderMeldCards(cards: Card[], wildRank: number): Card[] {
   const naturals = cards.filter((c) => !isWildCard(c, wildRank));
   const wilds = cards.filter((c) => isWildCard(c, wildRank));
-  if (naturals.length <= 1) return [...naturals, ...wilds];
+  if (naturals.length <= 1) return [...cards];
 
-  // Grup per ise
+  // Grup per ise (aynı sayı farklı renkler)
   if (naturals.every((c) => c.rank === naturals[0].rank)) {
     return [...naturals, ...wilds];
+  }
+
+  // Oyuncunun mevcut dizilimi zaten geçerli bir ardışık sıra mı kontrol et
+  for (const aceAs14 of [false, true]) {
+    let matchesExistingOrder = true;
+    let impliedStart: number | null = null;
+    for (let i = 0; i < cards.length; i++) {
+      const c = cards[i];
+      if (!isWildCard(c, wildRank)) {
+        const pos = c.rank === 1 && aceAs14 ? 14 : c.rank;
+        const startCandidate = pos - i;
+        if (impliedStart === null) {
+          impliedStart = startCandidate;
+        } else if (impliedStart !== startCandidate) {
+          matchesExistingOrder = false;
+          break;
+        }
+      }
+    }
+    if (
+      matchesExistingOrder &&
+      impliedStart !== null &&
+      impliedStart >= 1 &&
+      impliedStart + cards.length - 1 <= 14
+    ) {
+      return [...cards];
+    }
   }
 
   // Seri per ise As'ın 1 mi 14 mü olduğunu bul
@@ -198,23 +227,30 @@ export function orderMeldCards(cards: Card[], wildRank: number): Card[] {
     if (i > 0) {
       const gap = mapped[i].pos - mapped[i - 1].pos - 1;
       for (let g = 0; g < gap && usedWilds.length > 0; g++) {
-        result.push(usedWilds.pop()!);
+        result.push(usedWilds.shift()!);
       }
     }
     result.push(mapped[i].card);
   }
 
+  // Kalan jokerleri serinin üstüne (14'ü geçmiyorsa) veya altına ekle
+  let currentMaxPos = mapped[mapped.length - 1].pos;
   while (usedWilds.length > 0) {
-    result.push(usedWilds.pop()!);
+    if (currentMaxPos < 14) {
+      result.push(usedWilds.shift()!);
+      currentMaxPos++;
+    } else {
+      result.unshift(usedWilds.shift()!);
+    }
   }
   return result;
 }
 
 /**
  * Oyuncunun elindeki kağıtları (10 veya 11 kağıt) analiz ederek:
- * - En düşük ceza puanını bırakan optimum perleri bulur
- * - Eldeki Joker bir pere dahil olabiliyorsa 0 puan sayar, hiçbir pere giremiyorsa 25 puan yazar
- * - Tüm kağıtlar per oluyorsa canFinish = true döner
+ * - 10 kağıtlık tam bitiş (0 ceza / 11 kağıtta 1 kağıt atarak bitiş) varsa HER ZAMAN onu birinci öncelik yapar!
+ *   (Böylece 2♠ - Joker - Joker - 5♠ + Papaz varken, Papaz 10 puan diye Jokerleri Papaz'ın yanına ASLA koymaz!)
+ * - Tam bitiş yoksa en düşük ceza puanını bırakan optimum perleri bulur.
  */
 export function evaluateHandOptimal(cards: Card[], wildRank: number): HandEvaluation {
   const n = cards.length;
@@ -225,13 +261,13 @@ export function evaluateHandOptimal(cards: Card[], wildRank: number): HandEvalua
   // 1. Eldeki kağıtlardan oluşturulabilecek tüm geçerli perleri (bitmask olarak) üret
   interface CandidateMeld {
     mask: number;
+    bitCount: number;
     cards: Card[];
   }
   const validMelds: CandidateMeld[] = [];
 
   const totalMasks = 1 << n;
   for (let mask = 0; mask < totalMasks; mask++) {
-    // Bit sayısını hesapla (3 ile n arası)
     let bitCount = 0;
     let temp = mask;
     while (temp > 0) {
@@ -248,52 +284,89 @@ export function evaluateHandOptimal(cards: Card[], wildRank: number): HandEvalua
     }
 
     if (isValidMeld(subset, wildRank)) {
-      validMelds.push({ mask, cards: subset });
+      validMelds.push({ mask, bitCount, cards: subset });
     }
   }
 
-  // 2. Backtracking ile kesişmeyen per kombinasyonlarını dene ve en düşük cezayı bul
+  // Büyük perleri önce dene
+  validMelds.sort((a, b) => b.bitCount - a.bitCount);
+
+  const rawPenalties = cards.map((c) => getRawCardPenalty(c, wildRank));
+
+  let bestIsFinishReady = false; // 10 kağıt per olmuş mu? (n=10'da 10 kağıt, n=11'de >=10 kağıt)
   let bestPenalty = Infinity;
   let bestMeldMasks: number[] = [];
   let bestMeldedCardCount = -1;
+  let bestDiscardCandidateValue = -1; // n=11'de 10 kağıt per olduğunda atılacak 11. kağıdın puanı (yüksek olanı atmak avantajlıdır)
 
-  // Başlangıçta hiç per yapılmamış durumu hesapla
-  const rawPenalties = cards.map((c) => getRawCardPenalty(c, wildRank));
-
-  function computeUnmeldedPenalty(usedMask: number): { penalty: number; meldedCount: number } {
+  function evaluateMaskState(usedMask: number): {
+    isFinishReady: boolean;
+    penalty: number;
+    meldedCount: number;
+    discardCandidateValue: number;
+  } {
     let penalty = 0;
     let meldedCount = 0;
+    let singleUnmeldedVal = -1;
     for (let i = 0; i < n; i++) {
       if ((usedMask & (1 << i)) === 0) {
         penalty += rawPenalties[i];
+        singleUnmeldedVal = isWildCard(cards[i], wildRank) ? 0 : rawPenalties[i];
       } else {
         meldedCount++;
       }
     }
-    return { penalty, meldedCount };
+    const isFinishReady =
+      (n === 10 && meldedCount === 10) || (n === 11 && meldedCount === 10);
+    return {
+      isFinishReady,
+      penalty: isFinishReady && n === 10 ? 0 : penalty,
+      meldedCount,
+      discardCandidateValue: n === 11 && meldedCount === 10 ? singleUnmeldedVal : -1,
+    };
   }
 
-  const visitedMasks = new Set<number>();
+  // Aynı usedMask'a daha erken bir startIdx ile ulaşıldıysa tekrar arama yapmaya gerek yok
+  const minStartIdxByMask = new Map<number, number>();
 
   function search(usedMask: number, startIdx: number, currentMasks: number[]) {
-    if (visitedMasks.has(usedMask)) return;
-    visitedMasks.add(usedMask);
+    const prevStart = minStartIdxByMask.get(usedMask);
+    if (prevStart !== undefined && prevStart <= startIdx) return;
+    minStartIdxByMask.set(usedMask, startIdx);
 
-    const { penalty, meldedCount } = computeUnmeldedPenalty(usedMask);
-    if (
-      penalty < bestPenalty ||
-      (penalty === bestPenalty && meldedCount > bestMeldedCardCount)
-    ) {
-      bestPenalty = penalty;
-      bestMeldMasks = [...currentMasks];
-      bestMeldedCardCount = meldedCount;
+    const state = evaluateMaskState(usedMask);
+
+    let isBetter = false;
+    if (state.isFinishReady && !bestIsFinishReady) {
+      isBetter = true;
+    } else if (state.isFinishReady && bestIsFinishReady) {
+      if (state.discardCandidateValue > bestDiscardCandidateValue) {
+        isBetter = true;
+      }
+    } else if (!state.isFinishReady && !bestIsFinishReady) {
+      if (
+        state.penalty < bestPenalty ||
+        (state.penalty === bestPenalty && state.meldedCount > bestMeldedCardCount)
+      ) {
+        isBetter = true;
+      }
     }
 
-    if (bestPenalty === 0 && bestMeldedCardCount === n) return;
+    if (isBetter) {
+      bestIsFinishReady = state.isFinishReady;
+      bestPenalty = state.penalty;
+      bestMeldMasks = [...currentMasks];
+      bestMeldedCardCount = state.meldedCount;
+      bestDiscardCandidateValue = state.discardCandidateValue;
+    }
+
+    if (n === 10 && bestIsFinishReady) return;
 
     for (let i = startIdx; i < validMelds.length; i++) {
       const m = validMelds[i];
       if ((usedMask & m.mask) === 0) {
+        // 11 kağıtlı elde 10 kağıttan fazlası (11 kağıt) tek seferde açılmaz (1 kağıt yere atılmalıdır)
+        if (n === 11 && state.meldedCount + m.bitCount > 10) continue;
         currentMasks.push(m.mask);
         search(usedMask | m.mask, i + 1, currentMasks);
         currentMasks.pop();
@@ -340,33 +413,188 @@ export function evaluateHandOptimal(cards: Card[], wildRank: number): HandEvalua
     canFinish: unmelded.length === 0 && n === 10,
     melds: chosenMelds,
     unmelded,
-    penalty: bestPenalty,
+    penalty: bestIsFinishReady ? 0 : bestPenalty,
     orderedCards,
   };
 }
 
 /**
- * 11 kağıtlı bir elde oyuncunun hangi kağıdı atarsa elini açıp bitirebileceğini kontrol eder.
- * Eğer bitebiliyorsa atılacak kağıdı ve kalan 10 kağıdın perlerini döner.
+ * Bir satırdaki kağıtların (tek bir per veya yan yana konulmuş iki per olarak)
+ * tamamının geçerli per oluşturup oluşturmadığını kontrol eder ve oyuncunun sırasını koruyarak döner.
  */
-export function findWinningDiscard(
-  cards11: Card[],
+export function decomposeRowIntoMelds(
+  rowCards: Card[],
   wildRank: number
-): { canWin: boolean; discardCard?: Card; evaluation?: HandEvaluation } {
-  if (cards11.length !== 11) return { canWin: false };
+): { valid: boolean; melds: Card[][] } {
+  const len = rowCards.length;
+  if (len === 0) return { valid: true, melds: [] };
+  if (len < 3) return { valid: false, melds: [] };
 
-  for (let i = 0; i < cards11.length; i++) {
-    const remaining10 = cards11.filter((_, idx) => idx !== i);
-    const eval10 = evaluateHandOptimal(remaining10, wildRank);
-    if (eval10.canFinish) {
+  // 1. Satırın tamamı tek başına geçerli bir per mi? (Ör: 2♠ - Joker - Joker - 5♠)
+  if (isValidMeld(rowCards, wildRank)) {
+    return { valid: true, melds: [orderMeldCards(rowCards, wildRank)] };
+  }
+
+  // 2. Satırda yan yana dizilmiş 2 (veya 3) bitişik per var mı? (Ör: 3'lü per + 3'lü per aynı satırda)
+  if (len >= 6) {
+    for (let split1 = 3; split1 <= len - 3; split1++) {
+      const firstPart = rowCards.slice(0, split1);
+      const restPart = rowCards.slice(split1);
+      if (isValidMeld(firstPart, wildRank)) {
+        const sub = decomposeRowIntoMelds(restPart, wildRank);
+        if (sub.valid) {
+          return {
+            valid: true,
+            melds: [orderMeldCards(firstPart, wildRank), ...sub.melds],
+          };
+        }
+      }
+    }
+  }
+
+  // 3. Satır içindeki kağıtlar kendi içinde firesiz per oluyor mu?
+  const rowEval = evaluateHandOptimal(rowCards, wildRank);
+  if (rowEval.unmelded.length === 0 && rowEval.melds.flat().length === len) {
+    return { valid: true, melds: rowEval.melds };
+  }
+
+  return { valid: false, melds: [] };
+}
+
+/**
+ * Oyuncunun 3 sıraya dizdiği 11 kağıt içinde, 1 kağıt yere atıldığında kalan 10 kağıdın
+ * oyuncunun kendi 3 sıra diziliminde geçerli perler oluşturup oluşturmadığını kontrol eder.
+ * Böylece oyuncunun yaptığı 2♠ - Joker - Joker - 5♠ perini ASLA bozmaz ve dışarıdaki 11. kağıdı (ör. Papaz) atar!
+ */
+export function evaluatePlayerRowsForFinish(
+  hand11: Card[],
+  handRows: string[][] | undefined,
+  wildRank: number,
+  preferredDiscardCardId?: string
+): {
+  canWinFromRows: boolean;
+  discardCard?: Card;
+  melds?: Card[][];
+  orderedCards?: Card[];
+} {
+  if (hand11.length !== 11 || !handRows || handRows.length !== 3) {
+    return { canWinFromRows: false };
+  }
+
+  const cardMap = new Map(hand11.map((c) => [c.id, c]));
+
+  // Denenecek atılacak kağıt adaylarını sırala:
+  // 1. Kullanıcının seçtiği kağıt (varsa)
+  // 2. Bir satırda tek başına duran kağıtlar veya satır başı/sonundaki yüksek cezalı kağıtlar
+  const candidateDiscardIds: string[] = [];
+  if (preferredDiscardCardId && cardMap.has(preferredDiscardCardId)) {
+    candidateDiscardIds.push(preferredDiscardCardId);
+  }
+  for (const c of hand11) {
+    if (!candidateDiscardIds.includes(c.id)) {
+      candidateDiscardIds.push(c.id);
+    }
+  }
+
+  for (const candId of candidateDiscardIds) {
+    const discardCard = cardMap.get(candId);
+    if (!discardCard) continue;
+
+    let allRowsValid = true;
+    const collectedMelds: Card[][] = [];
+    let totalCardsInRows = 0;
+
+    for (let r = 0; r < 3; r++) {
+      const rowIds = (handRows[r] || []).filter((id) => id !== candId);
+      const rowCards = rowIds
+        .map((id) => cardMap.get(id))
+        .filter((c): c is Card => c !== undefined);
+
+      if (rowCards.length === 0) continue;
+      totalCardsInRows += rowCards.length;
+
+      const decomp = decomposeRowIntoMelds(rowCards, wildRank);
+      if (!decomp.valid) {
+        allRowsValid = false;
+        break;
+      }
+      collectedMelds.push(...decomp.melds);
+    }
+
+    if (allRowsValid && totalCardsInRows === 10) {
       return {
-        canWin: true,
-        discardCard: cards11[i],
-        evaluation: eval10,
+        canWinFromRows: true,
+        discardCard,
+        melds: collectedMelds,
+        orderedCards: collectedMelds.flat(),
       };
     }
   }
-  return { canWin: false };
+
+  return { canWinFromRows: false };
+}
+
+/**
+ * 11 kağıtlı bir elde oyuncunun hangi kağıdı atarsa elini açıp bitirebileceğini kontrol eder.
+ * Önce oyuncunun kendi 3 sıra dizilimini (`handRows`) kontrol eder; orada geçerli bir 10'lu per dizilimi varsa
+ * (örneğin 2♠ - Joker - Joker - 5♠ ve boşta Papaz) doğrudan onu kullanır!
+ */
+export function findWinningDiscard(
+  cards11: Card[],
+  wildRank: number,
+  handRows?: string[][],
+  preferredDiscardCardId?: string
+): { canWin: boolean; discardCard?: Card; evaluation?: HandEvaluation } {
+  if (cards11.length !== 11) return { canWin: false };
+
+  // 1. ÖNCE oyuncunun kendi 3 sıra diziliminde geçerli bitiş var mı bak!
+  if (handRows && handRows.length === 3) {
+    const rowWin = evaluatePlayerRowsForFinish(
+      cards11,
+      handRows,
+      wildRank,
+      preferredDiscardCardId
+    );
+    if (rowWin.canWinFromRows && rowWin.discardCard && rowWin.melds && rowWin.orderedCards) {
+      return {
+        canWin: true,
+        discardCard: rowWin.discardCard,
+        evaluation: {
+          canFinish: true,
+          melds: rowWin.melds,
+          unmelded: [],
+          penalty: 0,
+          orderedCards: rowWin.orderedCards,
+        },
+      };
+    }
+  }
+
+  // 2. Genel kombinasyon taraması (Joker olmayan yüksek puanlı kağıdı atmayı tercih et)
+  let bestResult: { canWin: boolean; discardCard?: Card; evaluation?: HandEvaluation } = {
+    canWin: false,
+  };
+  let bestDiscardScore = -1;
+
+  for (let i = 0; i < cards11.length; i++) {
+    const cand = cards11[i];
+    const remaining10 = cards11.filter((_, idx) => idx !== i);
+    const eval10 = evaluateHandOptimal(remaining10, wildRank);
+    if (eval10.canFinish) {
+      const score =
+        (preferredDiscardCardId && cand.id === preferredDiscardCardId ? 1000 : 0) +
+        (isWildCard(cand, wildRank) ? 0 : getRawCardPenalty(cand, wildRank));
+      if (score > bestDiscardScore) {
+        bestDiscardScore = score;
+        bestResult = {
+          canWin: true,
+          discardCard: cand,
+          evaluation: eval10,
+        };
+      }
+    }
+  }
+  return bestResult;
 }
 
 /**

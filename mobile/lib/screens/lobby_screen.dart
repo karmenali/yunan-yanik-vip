@@ -34,35 +34,6 @@ class _LobbyScreenState extends State<LobbyScreen> {
     if (mounted) setState(() {});
   }
 
-  void _handleQuickPlay() {
-    final service = GameService.instance;
-    final userCredits = service.currentUser?.credits ?? 0;
-
-    // Eğer oyuncunun zaten oturduğu aktif bir masa varsa direkt oraya dön
-    if (service.rejoinedActiveTableId != null) {
-      _openTable(service.rejoinedActiveTableId!);
-      return;
-    }
-
-    // Bekleyen, boş koltuğu olan ve oyuncunun kredisinin yettiği en dolu masayı bul
-    final candidates = service.lobbyTables.where((t) {
-      final isWaiting = t.status == 'waiting' || t.status == 'finished';
-      final hasSeat = t.seatedCount < t.maxPlayers;
-      final canAfford = userCredits >= t.entryFee;
-      return isWaiting && hasSeat && canAfford;
-    }).toList();
-
-    if (candidates.isNotEmpty) {
-      candidates.sort((a, b) => b.seatedCount.compareTo(a.seatedCount));
-      final chosen = candidates.first;
-      _openTable(chosen.id, autoSit: true);
-    } else if (service.lobbyTables.isNotEmpty) {
-      _openTable(service.lobbyTables.first.id, autoSit: true);
-    } else {
-      _showCreateTableDialog();
-    }
-  }
-
   Future<void> _showRulesSheet() async {
     await showModalBottomSheet(
       context: context,
@@ -980,7 +951,7 @@ class _LobbyScreenState extends State<LobbyScreen> {
                   ),
                   const SizedBox(height: 10),
 
-                  // AKSİYON BUTONLARI SATIRI (HIZLI OYNA + YENİ MASA KUR + ADMİN)
+                  // AKSİYON BUTONLARI SATIRI (YENİ MASA KUR + ADMİN)
                   Row(
                     children: [
                       if (user?.isAdmin == true) ...[
@@ -1012,11 +983,11 @@ class _LobbyScreenState extends State<LobbyScreen> {
                                 size: 16,
                               ),
                               label: const Text(
-                                'YÖNETİM',
+                                'YÖNETİM PANELİ',
                                 overflow: TextOverflow.ellipsis,
                                 style: TextStyle(
                                   fontWeight: FontWeight.w900,
-                                  fontSize: 11,
+                                  fontSize: 11.5,
                                 ),
                               ),
                             ),
@@ -1024,35 +995,6 @@ class _LobbyScreenState extends State<LobbyScreen> {
                         ),
                         const SizedBox(width: 8),
                       ],
-                      Expanded(
-                        child: SizedBox(
-                          height: 42,
-                          child: ElevatedButton.icon(
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: const Color(0xFF059669),
-                              foregroundColor: Colors.white,
-                              padding: const EdgeInsets.symmetric(horizontal: 8),
-                              shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(12),
-                                side: const BorderSide(
-                                  color: Color(0xFF34D399),
-                                ),
-                              ),
-                            ),
-                            onPressed: _handleQuickPlay,
-                            icon: const Icon(Icons.flash_on_rounded, size: 17),
-                            label: const Text(
-                              'HIZLI OYNA',
-                              overflow: TextOverflow.ellipsis,
-                              style: TextStyle(
-                                fontWeight: FontWeight.w900,
-                                fontSize: 11.5,
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 8),
                       Expanded(
                         child: SizedBox(
                           height: 42,
@@ -1068,11 +1010,11 @@ class _LobbyScreenState extends State<LobbyScreen> {
                             onPressed: _showCreateTableDialog,
                             icon: const Icon(Icons.add_circle, size: 17),
                             label: const Text(
-                              'MASA KUR',
+                              'YENİ MASA KUR',
                               overflow: TextOverflow.ellipsis,
                               style: TextStyle(
                                 fontWeight: FontWeight.w900,
-                                fontSize: 11.5,
+                                fontSize: 12,
                               ),
                             ),
                           ),
@@ -1157,7 +1099,7 @@ class _LobbyScreenState extends State<LobbyScreen> {
                   const SizedBox(width: 6),
                   _buildFilterChip('assisted', '✨ Yardımlı Mod'),
                   const SizedBox(width: 6),
-                  _buildFilterChip('unassisted', '🔥 Yardımsız (Usta)'),
+                  _buildFilterChip('unassisted', '🔥 Yardımsız Mod'),
                   const SizedBox(width: 6),
                   _buildFilterChip('open', '🪑 Boş Koltuk'),
                 ],
@@ -1168,27 +1110,41 @@ class _LobbyScreenState extends State<LobbyScreen> {
             Expanded(
               child: filteredTables.isEmpty
                   ? Center(
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          const Text('🃏', style: TextStyle(fontSize: 48)),
-                          const SizedBox(height: 10),
-                          const Text(
-                            'Bu filtrede açık masa yok. Yeni bir masa kurabilirsiniz!',
-                            style:
-                                TextStyle(color: Colors.white70, fontSize: 14),
-                          ),
-                          const SizedBox(height: 14),
-                          ElevatedButton.icon(
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: const Color(0xFFD4AF37),
-                              foregroundColor: Colors.black,
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 24),
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            const Text('🃏', style: TextStyle(fontSize: 48)),
+                            const SizedBox(height: 10),
+                            const Text(
+                              'Şu anda açık masa bulunmuyor.\nYeni bir masa kurarak oyunu başlatabilirsiniz!',
+                              textAlign: TextAlign.center,
+                              style: TextStyle(
+                                color: Colors.white70,
+                                fontSize: 13.5,
+                                height: 1.4,
+                              ),
                             ),
-                            onPressed: _showCreateTableDialog,
-                            icon: const Icon(Icons.add),
-                            label: const Text('Yeni Masa Kur'),
-                          ),
-                        ],
+                            const SizedBox(height: 14),
+                            ElevatedButton.icon(
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: const Color(0xFFD4AF37),
+                                foregroundColor: Colors.black,
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 20,
+                                  vertical: 11,
+                                ),
+                              ),
+                              onPressed: _showCreateTableDialog,
+                              icon: const Icon(Icons.add_circle_outline),
+                              label: const Text(
+                                'Yeni Masa Kur',
+                                style: TextStyle(fontWeight: FontWeight.w900),
+                              ),
+                            ),
+                          ],
+                        ),
                       ),
                     )
                   : ListView.builder(

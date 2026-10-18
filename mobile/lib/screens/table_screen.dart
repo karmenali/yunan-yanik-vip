@@ -34,12 +34,8 @@ class _TableScreenState extends State<TableScreen> {
   int _showdownElapsedMs = 0;
   int _lastAnimatedShowdownRound = -1;
 
-  // Sesli Sohbet (Hem Basılı Tut-Konuş hem Dokun-Konuş desteği)
-  bool _isVoiceRecording = false;
-  DateTime? _pttDownTime;
-  Timer? _pttAutoStopTimer;
-  int _recordingSeconds = 0;
-  Timer? _recordingTickTimer;
+  // Sayıya Göre Sırala mod değişimi (false = Sayı Sırası 1-2-3..K, true = Renk/Seri Sırası)
+  bool _sortBySuitMode = false;
 
   // Canlı Sayaç (Sunucu + Yerel Saniyelik Akıcı Senkronizasyon)
   Timer? _localSecondTicker;
@@ -134,8 +130,6 @@ class _TableScreenState extends State<TableScreen> {
     GameService.instance.removeListener(_onGameUpdate);
     _localSecondTicker?.cancel();
     _showdownTicker?.cancel();
-    _pttAutoStopTimer?.cancel();
-    _recordingTickTimer?.cancel();
     _toastSub?.cancel();
     _effectSub?.cancel();
     _cardAnimSub?.cancel();
@@ -326,9 +320,7 @@ class _TableScreenState extends State<TableScreen> {
       if (shouldLeave != true) return;
     }
 
-    if (_isVoiceRecording) {
-      await _stopVoiceRecording();
-    }
+    await gs.stopContinuousMic();
     gs.leaveCurrentTable();
     if (mounted) {
       Navigator.of(context).pop();
@@ -339,8 +331,10 @@ class _TableScreenState extends State<TableScreen> {
     CardModel card,
     TableStateModel table,
   ) async {
-    // Eğer atılmak istenen kağıt Joker (Wild) ise oyuncudan onay al!
-    if (card.isWild(table.wildRank)) {
+    // Yardımsız modda yerdeki gösterge jokerini otomatik söylemek yardım sayılacağından sadece Yardımlı modda veya fiziksel Jokerde uyar!
+    final shouldWarnWild =
+        card.isPhysicalJoker || (table.isAssisted && card.isWild(table.wildRank));
+    if (shouldWarnWild) {
       final confirm = await showDialog<bool>(
         context: context,
         builder: (ctx) => AlertDialog(
@@ -391,9 +385,12 @@ class _TableScreenState extends State<TableScreen> {
 
   Future<void> _handleDeclareFinishTap(TableStateModel table) async {
     final gs = GameService.instance;
+    final String? candidateDiscardId =
+        _selectedCardId ?? table.winningDiscardCardId;
+
     if (!table.isAssisted) {
       // Yardımsız (Usta) Modda El Açma Onayı ve Yanma Uyarısı!
-      if (_selectedCardId == null && _allLocalCards.length == 11) {
+      if (candidateDiscardId == null && _allLocalCards.length == 11) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content: Text(
@@ -404,6 +401,13 @@ class _TableScreenState extends State<TableScreen> {
         );
         return;
       }
+
+      final discardCardObj = _allLocalCards
+          .cast<CardModel?>()
+          .firstWhere((c) => c?.id == candidateDiscardId, orElse: () => null);
+      final discardLabel = discardCardObj != null
+          ? '${discardCardObj.rankLabel}${discardCardObj.suitSymbol}'
+          : 'Seçili kağıt';
 
       final confirm = await showDialog<bool>(
         context: context,
@@ -421,11 +425,12 @@ class _TableScreenState extends State<TableScreen> {
               fontSize: 16,
             ),
           ),
-          content: const Text(
-            'Seçtiğiniz kağıt yere atılacak ve 3 sıradaki 10 kağıdınız masaya açılacaktır.\n\n'
+          content: Text(
+            'Yere atılacak kağıt: $discardLabel\n'
+            'Kalan 10 kağıdınız 3 sıradaki diziliminize göre masaya açılacaktır.\n\n'
             '⚠️ DİKKAT: Eğer 3 sıradaki diziliminiz geçerli per oluşturmuyorsa DİREKT YANMIŞ SAYILIRSINIZ (101+) ve bu maç için tekrar para yatırıp dahil olma (Re-buy) hakkınızı KAYBEDERSİNİZ!\n\n'
             'Elinizi açmayı onaylıyor musunuz?',
-            style: TextStyle(color: Colors.white, fontSize: 12.5, height: 1.4),
+            style: const TextStyle(color: Colors.white, fontSize: 12.5, height: 1.4),
           ),
           actions: [
             TextButton(
@@ -450,71 +455,73 @@ class _TableScreenState extends State<TableScreen> {
     }
 
     gs.declareFinish(
-      discardCardId: _selectedCardId ?? table.winningDiscardCardId,
+      discardCardId: candidateDiscardId,
       rowCardIds: _currentRowIds,
     );
     setState(() => _selectedCardId = null);
   }
 
-  // ===========================================================================
-  // 🎙️ KESİNTİSİZ TELSİZ SESLİ SOHBET (BASILI TUT VEYA DOKUN-KONUŞ)
-  // ===========================================================================
-  Future<void> _onMicPointerDown() async {
-    _pttDownTime = DateTime.now();
-    if (_isVoiceRecording) {
-      await _stopVoiceRecording();
+  /// 3 Sıradaki tüm kağıtları TEK BİR BÜTÜN EL olarak sıralar ve 3 sıraya (4 - 3 - 3/4) temizce dağıtır
+  void _handleSortHandButtonTap(TableStateModel table) {
+    SoundFx.playCardTap();
+    final gs = GameService.instance;
+    if (table.isAssisted) {
+      gs.reorderHand();
       return;
     }
 
-    final started = await GameService.instance.startVoicePushToTalk();
-    if (!mounted) return;
-    if (started) {
-      _pttAutoStopTimer?.cancel();
-      _recordingTickTimer?.cancel();
-      setState(() {
-        _isVoiceRecording = true;
-        _recordingSeconds = 0;
-      });
-      _recordingTickTimer =
-          Timer.periodic(const Duration(seconds: 1), (timer) {
-        if (!mounted || !_isVoiceRecording) {
-          timer.cancel();
-          return;
-        }
-        setState(() => _recordingSeconds += 1);
-      });
-      _pttAutoStopTimer = Timer(const Duration(seconds: 8), () {
-        if (_isVoiceRecording) {
-          _stopVoiceRecording();
-        }
-      });
-    }
-  }
+    final allCards = _allLocalCards;
+    if (allCards.isEmpty) return;
 
-  Future<void> _onMicPointerUp() async {
-    if (!_isVoiceRecording || _pttDownTime == null) return;
-    final heldMs = DateTime.now().difference(_pttDownTime!).inMilliseconds;
-    if (heldMs >= 400) {
-      await _stopVoiceRecording();
+    const suitOrder = <String, int>{
+      'spades': 0,
+      'hearts': 1,
+      'clubs': 2,
+      'diamonds': 3,
+      'joker': 4,
+    };
+
+    final sorted = List<CardModel>.from(allCards);
+    if (!_sortBySuitMode) {
+      // 1. Mod: Sayı Sırası (A, 2, 3 .. 10, J, Q, K, Joker) — Aynı sayılar yan yana
+      sorted.sort((a, b) {
+        if (a.isPhysicalJoker != b.isPhysicalJoker) {
+          return a.isPhysicalJoker ? 1 : -1;
+        }
+        if (a.rank != b.rank) return a.rank.compareTo(b.rank);
+        return (suitOrder[a.suit] ?? 9).compareTo(suitOrder[b.suit] ?? 9);
+      });
     } else {
-      _pttAutoStopTimer?.cancel();
-      _pttAutoStopTimer = Timer(const Duration(seconds: 5), () {
-        if (_isVoiceRecording) {
-          _stopVoiceRecording();
+      // 2. Mod: Renk / Seri Sırası (♠, ♥, ♣, ♦ içinde 1-2-3..K)
+      sorted.sort((a, b) {
+        if (a.isPhysicalJoker != b.isPhysicalJoker) {
+          return a.isPhysicalJoker ? 1 : -1;
         }
+        final sa = suitOrder[a.suit] ?? 9;
+        final sb = suitOrder[b.suit] ?? 9;
+        if (sa != sb) return sa.compareTo(sb);
+        return a.rank.compareTo(b.rank);
       });
     }
-  }
 
-  Future<void> _stopVoiceRecording() async {
-    _pttAutoStopTimer?.cancel();
-    _recordingTickTimer?.cancel();
-    if (!_isVoiceRecording) return;
+    _sortBySuitMode = !_sortBySuitMode;
+
+    // 10 veya 11 kağıdı 3 sıraya (1. sıra: 4, 2. sıra: 3, 3. sıra: kalan 3 veya 4) tek bütün olarak dağıt
+    final row0End = math.min(4, sorted.length);
+    final row1End = math.min(7, sorted.length);
     setState(() {
-      _isVoiceRecording = false;
-      _recordingSeconds = 0;
+      _selectedCardId = null;
+      _localRows = [
+        sorted.sublist(0, row0End),
+        sorted.sublist(row0End, row1End),
+        sorted.sublist(row1End),
+      ];
     });
-    await GameService.instance.stopVoicePushToTalk();
+
+    gs.reorderHand(
+      orderedCardIds: sorted.map((c) => c.id).toList(),
+      rowCardIds: _currentRowIds,
+    );
   }
 
   String _formatDuration(int totalSeconds) {
@@ -649,59 +656,11 @@ class _TableScreenState extends State<TableScreen> {
               ),
             ),
 
-            // 3. AKTİF SES KAYDI GÖSTERGESİ
-            if (_isVoiceRecording)
-              Positioned(
-                top: 96,
-                left: 24,
-                right: 24,
-                child: Center(
-                  child: GestureDetector(
-                    onTap: _stopVoiceRecording,
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 18,
-                        vertical: 10,
-                      ),
-                      decoration: BoxDecoration(
-                        gradient: const LinearGradient(
-                          colors: [Color(0xFFDC2626), Color(0xFF991B1B)],
-                        ),
-                        borderRadius: BorderRadius.circular(30),
-                        border: Border.all(
-                          color: const Color(0xFFFDE047),
-                          width: 1.8,
-                        ),
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          const Icon(
-                            Icons.fiber_manual_record,
-                            color: Colors.white,
-                            size: 16,
-                          ),
-                          const SizedBox(width: 8),
-                          Text(
-                            '🎙️ SES KAYDEDİLİYOR (${_recordingSeconds}s) • Göndermek İçin Dokun / Bırak',
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontWeight: FontWeight.w900,
-                              fontSize: 11.5,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-
-            // 4. UÇAN EFEKT KATMANI
+            // 3. UÇAN EFEKT KATMANI
             ..._floatingEffects.map((eff) => _buildFloatingEffectOverlay(eff)),
 
-            // 5. BİLGİ / HATA BİLDİRİMİ
-            if (_toastBanner != null && !_isVoiceRecording)
+            // 4. BİLGİ / HATA BİLDİRİMİ
+            if (_toastBanner != null)
               Positioned(
                 top: 94,
                 left: 20,
@@ -748,21 +707,21 @@ class _TableScreenState extends State<TableScreen> {
                 ),
               ),
 
-            // 6. EL SONU ŞEFFAF ANİMASYONLU GÖSTERİM (10 SN AÇAN EL + SAAT YÖNÜNDE CEZA AÇILIŞI)
+            // 5. EL SONU ŞEFFAF ANİMASYONLU GÖSTERİM (10 SN AÇAN EL + SAAT YÖNÜNDE CEZA AÇILIŞI)
             if (isRoundEnd && !_showScoreboardModal)
               _buildAnimatedShowdownStage(table, mySeat, mySeatIdx),
 
-            // 7. TAM 101 PUAN TABLOSU MODALI
+            // 6. TAM 101 PUAN TABLOSU MODALI
             if (_showScoreboardModal)
               _buildScoreboardOverlay(table, mySeat, mySeatIdx, isRoundEnd),
 
-            // 8. MAÇ SONU ŞAMPİYON EKRANI
+            // 7. MAÇ SONU ŞAMPİYON EKRANI
             if (isFinished &&
                 table.lastWinnerInfo != null &&
                 !_dismissedWinnerModal)
               _buildMatchFinishedOverlay(table, mySeatIdx),
 
-            // 9. SOHBET ÇEKMECESİ (+ HIZLI SOHBET KALIPLARI)
+            // 8. SOHBET ÇEKMECESİ (+ HIZLI SOHBET KALIPLARI)
             if (_showChatDrawer) _buildChatDrawer(gs),
           ],
         ),
@@ -771,17 +730,19 @@ class _TableScreenState extends State<TableScreen> {
   }
 
   // ===========================================================================
-  // 1. ZYNGA ÜST VIP BAR + MOD ROZETİ + MAÇ SÜRESİ SAYACI
+  // 1. ZYNGA ÜST VIP BAR + MOD ROZETİ + PUBG TARZI CANLI SES (DİNLE / KONUŞ)
   // ===========================================================================
   Widget _buildZyngaTopBar(TableStateModel table, GameService gs) {
     final matchTimeStr = _formatDuration(table.matchElapsedSeconds);
     final isPlaying = table.status == 'playing';
+    final isMicOn = gs.isVoiceMicOn;
+    final isListenOn = gs.isVoiceListenOn;
 
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
         Container(
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
           decoration: BoxDecoration(
             gradient: const LinearGradient(
               colors: [Color(0xFF1E130C), Color(0xFF2D1B10), Color(0xFF1E130C)],
@@ -802,8 +763,8 @@ class _TableScreenState extends State<TableScreen> {
                 onTap: _confirmAndLeaveTable,
                 borderRadius: BorderRadius.circular(20),
                 child: Container(
-                  width: 34,
-                  height: 34,
+                  width: 32,
+                  height: 32,
                   decoration: BoxDecoration(
                     shape: BoxShape.circle,
                     gradient: const LinearGradient(
@@ -811,22 +772,22 @@ class _TableScreenState extends State<TableScreen> {
                     ),
                     border: Border.all(
                       color: const Color(0xFFD4AF37),
-                      width: 1.6,
+                      width: 1.5,
                     ),
                   ),
                   child: const Icon(
                     Icons.arrow_back_ios_new_rounded,
                     color: Color(0xFFFDE047),
-                    size: 15,
+                    size: 14,
                   ),
                 ),
               ),
-              const SizedBox(width: 6),
+              const SizedBox(width: 5),
 
               // Masa Adı & Yardımlı/Yardımsız Mod Rozeti
               Container(
                 padding:
-                    const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+                    const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                 decoration: BoxDecoration(
                   gradient: LinearGradient(
                     colors: table.isAssisted
@@ -836,7 +797,7 @@ class _TableScreenState extends State<TableScreen> {
                   borderRadius: BorderRadius.circular(18),
                   border: Border.all(
                     color: const Color(0xFFD4AF37),
-                    width: 1.4,
+                    width: 1.3,
                   ),
                 ),
                 child: Row(
@@ -844,32 +805,27 @@ class _TableScreenState extends State<TableScreen> {
                   children: [
                     Text(
                       table.isAssisted ? '✨' : '🔥',
-                      style: const TextStyle(fontSize: 12),
+                      style: const TextStyle(fontSize: 11),
                     ),
-                    const SizedBox(width: 4),
-                    ConstrainedBox(
-                      constraints: const BoxConstraints(maxWidth: 86),
-                      child: Text(
-                        table.isAssisted ? 'Yardımlı' : 'Yardımsız',
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          color: Color(0xFFFDE047),
-                          fontWeight: FontWeight.w900,
-                          fontSize: 10.5,
-                        ),
+                    const SizedBox(width: 3),
+                    Text(
+                      table.isAssisted ? 'Yardımlı' : 'Yardımsız',
+                      style: const TextStyle(
+                        color: Color(0xFFFDE047),
+                        fontWeight: FontWeight.w900,
+                        fontSize: 10,
                       ),
                     ),
                   ],
                 ),
               ),
-              const SizedBox(width: 6),
+              const SizedBox(width: 5),
 
               // Masa Ödül Havuzu (Pot) Rozeti
               Expanded(
                 child: Container(
                   padding:
-                      const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+                      const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
                   decoration: BoxDecoration(
                     color: Colors.black54,
                     borderRadius: BorderRadius.circular(18),
@@ -880,8 +836,8 @@ class _TableScreenState extends State<TableScreen> {
                   child: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      const Text('🪙', style: TextStyle(fontSize: 13)),
-                      const SizedBox(width: 4),
+                      const Text('🪙', style: TextStyle(fontSize: 12)),
+                      const SizedBox(width: 3),
                       Flexible(
                         child: Text(
                           '${table.pot > 0 ? table.pot : table.entryFee}',
@@ -890,7 +846,7 @@ class _TableScreenState extends State<TableScreen> {
                           style: const TextStyle(
                             color: Colors.white,
                             fontWeight: FontWeight.w900,
-                            fontSize: 12.5,
+                            fontSize: 11.5,
                           ),
                         ),
                       ),
@@ -898,7 +854,7 @@ class _TableScreenState extends State<TableScreen> {
                   ),
                 ),
               ),
-              const SizedBox(width: 5),
+              const SizedBox(width: 4),
 
               // 101 Puan Tablosu Butonu
               InkWell(
@@ -909,7 +865,7 @@ class _TableScreenState extends State<TableScreen> {
                 borderRadius: BorderRadius.circular(18),
                 child: Container(
                   padding:
-                      const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+                      const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
                   decoration: BoxDecoration(
                     color: Colors.black54,
                     borderRadius: BorderRadius.circular(18),
@@ -921,60 +877,13 @@ class _TableScreenState extends State<TableScreen> {
                       Icon(
                         Icons.leaderboard,
                         color: Color(0xFFFDE047),
-                        size: 13,
+                        size: 12,
                       ),
-                      SizedBox(width: 3),
+                      SizedBox(width: 2),
                       Text(
                         '101',
                         style: TextStyle(
                           color: Color(0xFFFDE047),
-                          fontWeight: FontWeight.w900,
-                          fontSize: 11,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-              const SizedBox(width: 5),
-
-              // TELSİZ MİKROFON
-              Listener(
-                onPointerDown: (_) => _onMicPointerDown(),
-                onPointerUp: (_) => _onMicPointerUp(),
-                child: AnimatedContainer(
-                  duration: const Duration(milliseconds: 150),
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
-                  decoration: BoxDecoration(
-                    gradient: _isVoiceRecording
-                        ? const LinearGradient(
-                            colors: [Color(0xFFEF4444), Color(0xFFB91C1C)],
-                          )
-                        : const LinearGradient(
-                            colors: [Color(0xFF15803D), Color(0xFF064E3B)],
-                          ),
-                    borderRadius: BorderRadius.circular(18),
-                    border: Border.all(
-                      color: _isVoiceRecording
-                          ? Colors.white
-                          : const Color(0xFFD4AF37),
-                      width: 1.4,
-                    ),
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(
-                        _isVoiceRecording ? Icons.mic : Icons.mic_none_rounded,
-                        color: Colors.white,
-                        size: 15,
-                      ),
-                      const SizedBox(width: 2),
-                      Text(
-                        _isVoiceRecording ? 'CANLI' : 'Ses',
-                        style: const TextStyle(
-                          color: Colors.white,
                           fontWeight: FontWeight.w900,
                           fontSize: 10.5,
                         ),
@@ -983,33 +892,117 @@ class _TableScreenState extends State<TableScreen> {
                   ),
                 ),
               ),
-              const SizedBox(width: 5),
+              const SizedBox(width: 4),
 
+              // PUBG TARZI HOPARLÖR (DİNLE AÇIK / KAPALI)
               InkWell(
-                onTap: () async {
-                  await SoundFx.setSoundEnabled(!SoundFx.soundEnabled);
-                  if (SoundFx.soundEnabled) SoundFx.playCardTap();
+                onTap: () {
+                  gs.toggleVoiceListen();
                   setState(() {});
                 },
                 borderRadius: BorderRadius.circular(18),
-                child: Container(
-                  width: 32,
-                  height: 32,
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 160),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 7, vertical: 5),
                   decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: Colors.black54,
-                    border: Border.all(color: const Color(0xFFD4AF37)),
+                    color: isListenOn
+                        ? const Color(0xFF065F46)
+                        : Colors.black54,
+                    borderRadius: BorderRadius.circular(18),
+                    border: Border.all(
+                      color: isListenOn
+                          ? const Color(0xFF34D399)
+                          : Colors.white38,
+                      width: 1.2,
+                    ),
                   ),
-                  child: Icon(
-                    SoundFx.soundEnabled ? Icons.volume_up : Icons.volume_off,
-                    color: SoundFx.soundEnabled
-                        ? const Color(0xFFFDE047)
-                        : Colors.white38,
-                    size: 15,
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        isListenOn
+                            ? Icons.headset_rounded
+                            : Icons.headset_off_rounded,
+                        color: isListenOn
+                            ? const Color(0xFFFDE047)
+                            : Colors.white54,
+                        size: 14,
+                      ),
+                      const SizedBox(width: 3),
+                      Text(
+                        'Dinle',
+                        style: TextStyle(
+                          color: isListenOn ? Colors.white : Colors.white54,
+                          fontWeight: FontWeight.w900,
+                          fontSize: 9.5,
+                        ),
+                      ),
+                    ],
                   ),
                 ),
               ),
               const SizedBox(width: 4),
+
+              // PUBG TARZI SÜREKLİ MİKROFON (KONUŞ CANLI / KAPALI)
+              InkWell(
+                onTap: () async {
+                  await gs.toggleContinuousMic();
+                  setState(() {});
+                },
+                borderRadius: BorderRadius.circular(18),
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 160),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+                  decoration: BoxDecoration(
+                    gradient: isMicOn
+                        ? const LinearGradient(
+                            colors: [Color(0xFF16A34A), Color(0xFF15803D)],
+                          )
+                        : const LinearGradient(
+                            colors: [Color(0xFF334155), Color(0xFF1E293B)],
+                          ),
+                    borderRadius: BorderRadius.circular(18),
+                    border: Border.all(
+                      color: isMicOn
+                          ? const Color(0xFF86EFAC)
+                          : const Color(0xFFD4AF37),
+                      width: 1.3,
+                    ),
+                    boxShadow: isMicOn
+                        ? [
+                            BoxShadow(
+                              color: const Color(0xFF22C55E)
+                                  .withValues(alpha: 0.55),
+                              blurRadius: 8,
+                            ),
+                          ]
+                        : null,
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        isMicOn ? Icons.mic_rounded : Icons.mic_off_rounded,
+                        color: isMicOn ? Colors.white : Colors.white70,
+                        size: 14,
+                      ),
+                      const SizedBox(width: 3),
+                      Text(
+                        isMicOn ? 'Konuş' : 'Kapalı',
+                        style: TextStyle(
+                          color: isMicOn ? Colors.white : Colors.white70,
+                          fontWeight: FontWeight.w900,
+                          fontSize: 9.5,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(width: 4),
+
               InkWell(
                 onTap: () => setState(() => _showChatDrawer = !_showChatDrawer),
                 borderRadius: BorderRadius.circular(18),
@@ -1323,7 +1316,8 @@ class _TableScreenState extends State<TableScreen> {
     }
 
     final avatar = VipAvatar.fromKey(seat.avatar);
-    final isSpeaking = gs.activeVoiceSpeakerUsername == seat.username;
+    final isSpeaking = gs.activeSpeakingUserIds.contains(seat.userId) ||
+        gs.activeVoiceSpeakerUsername == seat.username;
     final maxDur = math.max(1, table.turnDurationSeconds);
     final progress = isCurrentTurn
         ? (table.turnRemainingSeconds / maxDur).clamp(0.0, 1.0)
@@ -1415,8 +1409,18 @@ class _TableScreenState extends State<TableScreen> {
                               : isMe
                                   ? const Color(0xFFFACC15)
                                   : const Color(0xFFD4AF37),
-                      width: 2.0,
+                      width: isSpeaking ? 2.6 : 2.0,
                     ),
+                    boxShadow: isSpeaking
+                        ? [
+                            BoxShadow(
+                              color: const Color(0xFF22C55E)
+                                  .withValues(alpha: 0.75),
+                              blurRadius: 10,
+                              spreadRadius: 1.5,
+                            ),
+                          ]
+                        : null,
                   ),
                   child: Center(
                     child: Text(
@@ -1425,6 +1429,27 @@ class _TableScreenState extends State<TableScreen> {
                     ),
                   ),
                 ),
+
+                // Canlı Konuşma Rozeti (Sol Üst)
+                if (isSpeaking)
+                  Positioned(
+                    left: 0,
+                    top: 0,
+                    child: Container(
+                      width: 17,
+                      height: 17,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: const Color(0xFF16A34A),
+                        border: Border.all(color: Colors.white, width: 1.2),
+                      ),
+                      child: const Icon(
+                        Icons.volume_up_rounded,
+                        color: Colors.white,
+                        size: 10.5,
+                      ),
+                    ),
+                  ),
 
                 // Dağıtan (Dealer 'D') Rozeti (Sol Alt)
                 if (isDealer)
@@ -1560,11 +1585,15 @@ class _TableScreenState extends State<TableScreen> {
     required GameService gs,
   }) {
     if (!isPlaying && table.status != 'round_summary') {
+      final seatedPlayers = table.seats.whereType<SeatPlayerModel>().toList();
+      final seatedCount = seatedPlayers.length;
+      final readyCount = seatedPlayers.where((s) => s.isReady).length;
+
       return Container(
-        width: 225,
+        width: 230,
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
         decoration: BoxDecoration(
-          color: Colors.black.withValues(alpha: 0.68),
+          color: Colors.black.withValues(alpha: 0.72),
           borderRadius: BorderRadius.circular(18),
           border: Border.all(
             color: const Color(0xFFD4AF37).withValues(alpha: 0.8),
@@ -1575,9 +1604,7 @@ class _TableScreenState extends State<TableScreen> {
           mainAxisSize: MainAxisSize.min,
           children: [
             Text(
-              table.isAssisted
-                  ? '✨ YARDIMLI MOD MASASI'
-                  : '🔥 YARDIMSIZ (USTA) MASA',
+              table.isAssisted ? '✨ Yardımlı Mod' : '🔥 Yardımsız Mod',
               style: const TextStyle(
                 color: Color(0xFFFDE047),
                 fontWeight: FontWeight.w900,
@@ -1587,10 +1614,10 @@ class _TableScreenState extends State<TableScreen> {
             const SizedBox(height: 4),
             Text(
               mySeatIdx == -1
-                  ? 'Masadaki boş koltuklardan birine dokunarak oturun.'
-                  : 'En az 2 oyuncu HAZIR olduğunda 10\'ar kağıt dağıtılır.',
+                  ? 'Oynamak için boş bir koltuğa dokunun.\nKoltuk: $seatedCount/${table.maxPlayers}'
+                  : 'Tüm koltuklar dolup herkes HAZIR olunca başlar.\nKoltuk: $seatedCount/${table.maxPlayers}  •  Hazır: $readyCount/${table.maxPlayers}',
               textAlign: TextAlign.center,
-              style: const TextStyle(color: Colors.white70, fontSize: 10.5),
+              style: const TextStyle(color: Colors.white70, fontSize: 10.5, height: 1.3),
             ),
             if (mySeat != null) ...[
               const SizedBox(height: 8),
@@ -1675,6 +1702,7 @@ class _TableScreenState extends State<TableScreen> {
                 PlayingCardWidget(
                   card: indicator,
                   wildRank: table.wildRank,
+                  showWildHints: true,
                   width: 52,
                   height: 74,
                 )
@@ -1683,8 +1711,8 @@ class _TableScreenState extends State<TableScreen> {
               const SizedBox(height: 3),
               Text(
                 indicator != null
-                    ? 'JOKER ${indicator.rankLabel}${indicator.suitSymbol}'
-                    : 'JOKER',
+                    ? 'GÖSTERGE ${indicator.rankLabel}${indicator.suitSymbol}'
+                    : 'GÖSTERGE',
                 style: const TextStyle(
                   color: Color(0xFFFDE047),
                   fontWeight: FontWeight.w900,
@@ -1754,6 +1782,7 @@ class _TableScreenState extends State<TableScreen> {
                     ? PlayingCardWidget(
                         card: discardTop,
                         wildRank: table.wildRank,
+                        showWildHints: table.isAssisted,
                         width: 52,
                         height: 74,
                       )
@@ -1839,6 +1868,7 @@ class _TableScreenState extends State<TableScreen> {
                         itemBuilder: (_, idx) => PlayingCardWidget(
                           card: history[idx],
                           wildRank: table.wildRank,
+                          showWildHints: table.isAssisted,
                           width: 60,
                           height: 86,
                         ),
@@ -1869,10 +1899,15 @@ class _TableScreenState extends State<TableScreen> {
         ? table.canFinishNow
         : (_allLocalCards.length == 11 && hasDrawn);
     final deadwoodPoints = table.currentHandPenalty;
+    final selectedCard = _selectedCardId != null
+        ? _allLocalCards
+            .cast<CardModel?>()
+            .firstWhere((c) => c?.id == _selectedCardId, orElse: () => null)
+        : null;
 
     return Column(
       children: [
-        // ÜST DURUM BANDI (Yardımlı modda Ceza Puanı, Yardımsız modda Usta Mod Uyarısı)
+        // SADE VE PROFESYONEL ÜST DURUM BANDI (Gereksiz taşan yazılar kaldırıldı)
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
           child: Row(
@@ -1894,10 +1929,10 @@ class _TableScreenState extends State<TableScreen> {
                 ),
                 child: Text(
                   !isAssisted
-                      ? '🔥 YARDIMSIZ MOD: Perleri 3 Sırada Dizin'
+                      ? '🔥 Yardımsız Mod'
                       : canFinish
-                          ? '✨ EL AÇMAYA HAZIR (0 CEZA)'
-                          : 'Elde Ceza: $deadwoodPoints Puan',
+                          ? '✨ El Açmaya Hazır'
+                          : 'Ceza: $deadwoodPoints Puan',
                   style: TextStyle(
                     color: !isAssisted
                         ? const Color(0xFFFCA5A5)
@@ -1905,22 +1940,28 @@ class _TableScreenState extends State<TableScreen> {
                             ? const Color(0xFF4ADE80)
                             : const Color(0xFFFDE047),
                     fontWeight: FontWeight.w900,
-                    fontSize: 10,
+                    fontSize: 10.5,
                   ),
                 ),
               ),
-              Text(
-                _dragReadyToDiscardUp
-                    ? '🎯 YERE ATMAK İÇİN BIRAKIN!'
-                    : '↕ 3 Sıra Arasında Sürükleyin',
-                style: TextStyle(
-                  color: _dragReadyToDiscardUp
-                      ? const Color(0xFF4ADE80)
-                      : Colors.white70,
-                  fontSize: 9.5,
-                  fontWeight: FontWeight.w700,
+              if (_dragReadyToDiscardUp)
+                const Text(
+                  '🎯 Yere Atmak İçin Bırakın',
+                  style: TextStyle(
+                    color: Color(0xFF4ADE80),
+                    fontSize: 10,
+                    fontWeight: FontWeight.w900,
+                  ),
+                )
+              else if (selectedCard != null)
+                Text(
+                  'Seçili: ${selectedCard.rankLabel}${selectedCard.suitSymbol}',
+                  style: const TextStyle(
+                    color: Color(0xFFFDE047),
+                    fontSize: 10,
+                    fontWeight: FontWeight.w800,
+                  ),
                 ),
-              ),
             ],
           ),
         ),
@@ -1932,7 +1973,7 @@ class _TableScreenState extends State<TableScreen> {
                   child: Text(
                     mySeatIdx == -1
                         ? 'Oynamak için masadaki boş bir koltuğa dokunun'
-                        : 'Yeni elin dağıtılması bekleniyor...',
+                        : 'Tüm koltuklar hazır olduğunda el dağıtılır...',
                     style: const TextStyle(color: Colors.white60, fontSize: 13),
                   ),
                 )
@@ -1968,10 +2009,7 @@ class _TableScreenState extends State<TableScreen> {
                   label: isAssisted ? 'OTOMATİK\nPER DİZ' : 'SAYIYA GÖRE\nSIRALA',
                   isGold: false,
                   enabled: _allLocalCards.isNotEmpty,
-                  onTap: () {
-                    SoundFx.playCardTap();
-                    gs.reorderHand();
-                  },
+                  onTap: () => _handleSortHandButtonTap(table),
                 ),
               ),
               const SizedBox(width: 6),
@@ -2045,8 +2083,8 @@ class _TableScreenState extends State<TableScreen> {
 
             SoundFx.playCardTap();
             setState(() {
+              // Sürükleme işlemi kartı kalıcı olarak "seçili" bırakmaz!
               _draggingCardId = hit.id;
-              _selectedCardId = hit.id;
               _dragLocalPos = pos;
               _dragReadyToDiscardUp = false;
             });
@@ -2220,7 +2258,7 @@ class _TableScreenState extends State<TableScreen> {
           : startX + idx * stepX;
       final double top = isDragging
           ? (_dragLocalPos.dy - cardH / 2).clamp(-40.0, rowH * 3 - cardH)
-          : baseTop - (isSelected ? 7.0 : 0.0);
+          : baseTop - (isSelected ? 8.0 : 0.0);
 
       return AnimatedPositioned(
         key: ValueKey(cardId),
@@ -2242,13 +2280,14 @@ class _TableScreenState extends State<TableScreen> {
             }
           },
           child: Transform.scale(
-            scale: isDragging ? 1.08 : 1.0,
+            scale: isDragging ? 1.06 : 1.0,
             child: PlayingCardWidget(
               card: card,
               wildRank: table.wildRank,
+              showWildHints: table.isAssisted,
               width: cardW,
               height: cardH,
-              isSelected: isSelected || isDragging,
+              isSelected: isSelected,
               isMelded: isMelded,
               isNewlyDrawn: isNewlyDrawn,
               isWinningDiscardCandidate: isWinningDiscard,

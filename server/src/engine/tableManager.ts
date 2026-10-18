@@ -1,9 +1,12 @@
+import crypto from 'crypto';
 import { Server, Socket } from 'socket.io';
 import { v4 as uuidv4 } from 'uuid';
 import {
   Card,
   dealRoundHands,
+  decomposeRowIntoMelds,
   evaluateHandOptimal,
+  evaluatePlayerRowsForFinish,
   findWinningDiscard,
   selectBestAutoDiscard,
 } from './gameEngine';
@@ -24,6 +27,8 @@ export interface SeatPlayer {
   consecutiveTimeouts: number;
   hand: Card[];
   handRows?: string[][]; // 3 sıralı ıstaka dizilimi
+  openedMelds?: Card[][]; // Oyuncunun el açarken masaya serdiği gerçek per dizilimi
+  sortMode?: 'rank' | 'suit'; // Sayıya Göre Sırala butonunun geçiş modu
 }
 
 export interface RoundScoreSnapshot {
@@ -121,7 +126,7 @@ export class TableManager {
 
   constructor(io: Server) {
     this.io = io;
-    this.seedDefaultTables();
+    // Varsayılan açık/boş masa oluşturulmaz; yalnızca oyuncular masa kurduğunda görünür.
     // Her 1 saniyede bir aktif masalara canlı sayaç (hamle kalan süre + toplam maç süresi) gönder
     setInterval(() => this.tickActiveTables(), 1000);
   }
@@ -164,13 +169,6 @@ export class TableManager {
         });
       }
     }
-  }
-
-  private seedDefaultTables() {
-    this.createTable('VIP Salon #1 (2 Kişilik)', 'system', 'Kulüp', 2, 100, true);
-    this.createTable('Atina Meydanı (4 Kişilik)', 'system', 'Kulüp', 4, 250, true);
-    this.createTable('Usta Salonu (Yardımsız 4 Kişilik)', 'system', 'Kulüp', 4, 300, false);
-    this.createTable('Büyük Masa (6 Kişilik)', 'system', 'Kulüp', 6, 500, true);
   }
 
   private splitHandIntoDefaultRows(cards: Card[]): string[][] {
@@ -354,7 +352,7 @@ export class TableManager {
       name: name.trim() || `Masa #${id.slice(0, 4)}`,
       hostUserId,
       hostUsername,
-      minPlayers: 2,
+      minPlayers: clampedMax,
       maxPlayers: clampedMax,
       entryFee: cleanFee,
       isAssisted: Boolean(isAssisted),
@@ -548,6 +546,8 @@ export class TableManager {
         consecutiveTimeouts: 0,
         hand: [],
         handRows: [[], [], []],
+        openedMelds: undefined,
+        sortMode: 'rank',
       };
 
       if (table.status === 'finished') {
@@ -561,6 +561,7 @@ export class TableManager {
             s.totalScore = 0;
             s.hand = [];
             s.handRows = [[], [], []];
+            s.openedMelds = undefined;
           }
         }
       }
@@ -614,6 +615,7 @@ export class TableManager {
             s.totalScore = 0;
             s.hand = [];
             s.handRows = [[], [], []];
+            s.openedMelds = undefined;
           }
         }
       }
@@ -621,9 +623,12 @@ export class TableManager {
       seat.isReady = !seat.isReady;
       this.broadcastTableState(tableId);
 
-      // Masada en az 2 oyuncu oturuyor ve oturan HERKES Hazır dediyse oyunu başlat!
+      // KURAL: Masadaki TÜM koltuklar (table.maxPlayers) dolup herkes HAZIR olduğunda oyun başlar!
       const seatedPlayers = table.seats.filter((s): s is SeatPlayer => s !== null);
-      if (seatedPlayers.length >= table.minPlayers && seatedPlayers.every((s) => s.isReady)) {
+      if (
+        seatedPlayers.length === table.maxPlayers &&
+        seatedPlayers.every((s) => s.isReady)
+      ) {
         await this.startMatch(table);
       }
     });
@@ -632,7 +637,7 @@ export class TableManager {
   private async startMatch(table: GameTable): Promise<void> {
     if (table.status !== 'waiting') return;
     const seatedPlayers = table.seats.filter((s): s is SeatPlayer => s !== null);
-    if (seatedPlayers.length < 2) return;
+    if (seatedPlayers.length < table.maxPlayers) return;
 
     // Senkron kilit: Çift tahsilatı önlemek için durumu hemen 'starting' yap
     table.status = 'starting';
@@ -701,10 +706,11 @@ export class TableManager {
       p.consecutiveTimeouts = 0;
       p.hand = [];
       p.handRows = [[], [], []];
+      p.openedMelds = undefined;
     }
 
-    // İlk dağıtan rastgele bir koltuk
-    table.dealerSeat = seatedPlayers[Math.floor(Math.random() * seatedPlayers.length)].seatIndex;
+    // İlk dağıtan CSPRNG (crypto.randomInt) ile rastgele bir koltuk
+    table.dealerSeat = seatedPlayers[crypto.randomInt(0, seatedPlayers.length)].seatIndex;
 
     this.broadcastLobbyTables();
     this.startNewRound(table);
@@ -930,9 +936,11 @@ export class TableManager {
 
   /**
    * Oyuncunun "EL AÇ / BİTİR" yapması:
+   * - ÖNCE oyuncunun 3 sırada kendi dizdiği perleri (`evaluatePlayerRowsForFinish`) kontrol eder.
+   *   Böylece oyuncunun 2♠ - Joker - Joker - 5♠ gibi yaptığı geçerli perleri ASLA bozmaz ve dışarıda kalan 11. kağıdı (ör. Papaz) atar!
    * - Yardımlı Modda (`table.isAssisted === true`): Geçersizse uyarı verir, oyuncuyu yakmaz.
-   * - Yardımsız Modda (`table.isAssisted === false`): Oyuncunun 3 sıradaki dizilimini ve 10 kağıdını kontrol eder.
-   *   Eğer hatalı el açarsa oyuncu DİREKT YANAR (101+) ve bu oyun için RE-BUY (yeniden giriş) hakkını tamamen kaybeder!
+   * - Yardımsız Modda (`table.isAssisted === false`): Eğer hatalı el açarsa oyuncu DİREKT YANAR (101+)
+   *   ve bu oyun için RE-BUY (yeniden giriş) hakkını tamamen kaybeder!
    */
   declareFinish(
     userId: string,
@@ -960,105 +968,88 @@ export class TableManager {
         this.syncSeatHandRows(currentSeat);
       }
 
+      // 1. ÖNCE oyuncunun kendi 3 sıra diziliminde (ör. 2♠ - Joker - Joker - 5♠ + Papaz) geçerli bitiş var mı kontrol et!
+      const rowFinish = evaluatePlayerRowsForFinish(
+        currentSeat.hand,
+        currentSeat.handRows,
+        table.wildRank,
+        discardCardId
+      );
+
+      if (
+        rowFinish.canWinFromRows &&
+        rowFinish.discardCard &&
+        rowFinish.melds &&
+        rowFinish.orderedCards
+      ) {
+        currentSeat.hand = rowFinish.orderedCards;
+        currentSeat.openedMelds = rowFinish.melds;
+        const newRows: string[][] = [[], [], []];
+        rowFinish.melds.forEach((meld, idx) => {
+          const rIdx = Math.min(2, idx);
+          newRows[rIdx].push(...meld.map((c) => c.id));
+        });
+        currentSeat.handRows = newRows;
+        this.syncSeatHandRows(currentSeat);
+        table.discardPile.push(rowFinish.discardCard);
+        this.endRound(table, currentSeat.userId, null);
+        return;
+      }
+
       if (table.isAssisted) {
-        // YARDIMLI MOD: Otomatik kontrol
-        let chosenDiscard: Card | null = null;
-        let remaining10: Card[] = [];
+        // YARDIMLI MOD: Oyuncunun 3 sırası doğrudan per değilse bile eldeki 11 kağıttan 10'u per oluyorsa otomatik bul ve aç
+        const winCheck = findWinningDiscard(
+          currentSeat.hand,
+          table.wildRank,
+          currentSeat.handRows,
+          discardCardId
+        );
 
-        if (discardCardId) {
-          const idx = currentSeat.hand.findIndex((c) => c.id === discardCardId);
-          if (idx !== -1) {
-            const candidate10 = currentSeat.hand.filter((_, i) => i !== idx);
-            const eval10 = evaluateHandOptimal(candidate10, table.wildRank);
-            if (eval10.canFinish) {
-              chosenDiscard = currentSeat.hand[idx];
-              remaining10 = eval10.orderedCards;
-            }
-          }
-        }
-
-        if (!chosenDiscard) {
-          for (let i = 0; i < currentSeat.hand.length; i++) {
-            const candidate10 = currentSeat.hand.filter((_, idx) => idx !== i);
-            const eval10 = evaluateHandOptimal(candidate10, table.wildRank);
-            if (eval10.canFinish) {
-              chosenDiscard = currentSeat.hand[i];
-              remaining10 = eval10.orderedCards;
-              break;
-            }
-          }
-        }
-
-        if (!chosenDiscard) {
+        if (!winCheck.canWin || !winCheck.discardCard || !winCheck.evaluation) {
           throw new Error(
             'Elinizdeki 10 kağıdın tamamı geçerli per oluşturmuyor! Açmak için boşta kağıt kalmamalıdır.'
           );
         }
 
-        currentSeat.hand = remaining10;
+        currentSeat.hand = winCheck.evaluation.orderedCards;
+        currentSeat.openedMelds = winCheck.evaluation.melds;
+        const newRows: string[][] = [[], [], []];
+        winCheck.evaluation.melds.forEach((meld, idx) => {
+          const rIdx = Math.min(2, idx);
+          newRows[rIdx].push(...meld.map((c) => c.id));
+        });
+        currentSeat.handRows = newRows;
         this.syncSeatHandRows(currentSeat);
-        table.discardPile.push(chosenDiscard);
+        table.discardPile.push(winCheck.discardCard);
         this.endRound(table, currentSeat.userId, null);
         return;
       }
 
       // YARDIMSIZ (USTA) MOD:
-      // Atılacak kağıt seçilmiş olmalı (veya yoksa eldeki son kağıt atılır)
+      // Buraya gelindiyse oyuncunun 3 sıradaki dizilimi geçerli bir 10'lu el açma oluşturmuyordur!
       let discardIdx = discardCardId
         ? currentSeat.hand.findIndex((c) => c.id === discardCardId)
         : -1;
       if (discardIdx === -1) {
-        // Seçilmediyse 11 kağıt içinden en uygun adayı veya son kağıdı seç
-        const winCheck = findWinningDiscard(currentSeat.hand, table.wildRank);
-        if (winCheck.canWin && winCheck.discardCard) {
-          discardIdx = currentSeat.hand.findIndex((c) => c.id === winCheck.discardCard!.id);
-        } else {
-          discardIdx = currentSeat.hand.length - 1;
-        }
+        discardIdx = currentSeat.hand.length - 1;
       }
 
       const chosenDiscard = currentSeat.hand[discardIdx];
       const remaining10 = currentSeat.hand.filter((_, i) => i !== discardIdx);
       currentSeat.hand = remaining10;
+      currentSeat.openedMelds = undefined;
       this.syncSeatHandRows(currentSeat);
       table.discardPile.push(chosenDiscard);
 
-      // Oyuncunun 3 sıradaki dizilimini ve 10 kağıdını doğrula
-      const cardMap = new Map(remaining10.map((c) => [c.id, c]));
-      let rowsValid = true;
-      const activeRows = (currentSeat.handRows || []).filter((r) => r.length > 0);
-      if (activeRows.length > 0) {
-        for (const rIds of activeRows) {
-          const rowCards = rIds
-            .map((id) => cardMap.get(id))
-            .filter((c): c is Card => c !== undefined);
-          if (rowCards.length > 0) {
-            const rowEval = evaluateHandOptimal(rowCards, table.wildRank);
-            if (rowEval.unmelded.length > 0) {
-              rowsValid = false;
-              break;
-            }
-          }
-        }
-      }
-
-      const fullEval10 = evaluateHandOptimal(remaining10, table.wildRank);
-      const isValidDeclare = fullEval10.canFinish && rowsValid;
-
-      if (isValidDeclare) {
-        // Başarılı El Açma!
-        this.endRound(table, currentSeat.userId, null);
-      } else {
-        // HATALI EL AÇMA CEZASI!
-        // Oyuncu direkt yanar ve bu maç için Re-buy (tekrar para yatırıp dahil olma) hakkını kaybeder!
-        currentSeat.forfeitedRebuy = true;
-        this.io.to(`table:${table.id}`).emit('false_declare_penalty', {
-          userId: currentSeat.userId,
-          username: currentSeat.username,
-          message: `${currentSeat.username} Yardımsız Modda HATALI EL AÇTI! Direkt yandı ve yeniden giriş (Re-buy) hakkını kaybetti!`,
-        });
-        this.endRound(table, null, currentSeat.userId);
-      }
+      // HATALI EL AÇMA CEZASI!
+      // Oyuncu direkt yanar ve bu maç için Re-buy (tekrar para yatırıp dahil olma) hakkını kaybeder!
+      currentSeat.forfeitedRebuy = true;
+      this.io.to(`table:${table.id}`).emit('false_declare_penalty', {
+        userId: currentSeat.userId,
+        username: currentSeat.username,
+        message: `${currentSeat.username} Yardımsız Modda HATALI EL AÇTI! Direkt yandı ve yeniden giriş (Re-buy) hakkını kaybetti!`,
+      });
+      this.endRound(table, null, currentSeat.userId);
     });
   }
 
@@ -1100,9 +1091,16 @@ export class TableManager {
 
     for (let idx = 0; idx < orderedPlayers.length; idx++) {
       const player = orderedPlayers[idx];
-      const evalHand = evaluateHandOptimal(player.hand, table.wildRank);
       const isFinisher = player.userId === finisherUserId;
       const isFalseDeclarer = player.userId === falseDeclarerUserId;
+
+      // Eli açan oyuncunun kendi dizdiği perleri (`openedMelds`) birebir koru!
+      const evalHand = evaluateHandOptimal(player.hand, table.wildRank);
+      const displayMelds =
+        isFinisher && player.openedMelds && player.openedMelds.length > 0
+          ? player.openedMelds
+          : evalHand.melds;
+      const displayUnmelded = isFinisher ? [] : evalHand.unmelded;
 
       let roundPenalty = 0;
       if (falseDeclarerUserId) {
@@ -1149,8 +1147,8 @@ export class TableManager {
         revealOrder: idx,
         revealStartMs,
         revealDurationMs,
-        melds: evalHand.melds,
-        unmelded: isFinisher ? [] : evalHand.unmelded,
+        melds: displayMelds,
+        unmelded: displayUnmelded,
         roundPenalty,
         previousScore: prevScore,
         newTotalScore: newTotal,
@@ -1409,6 +1407,66 @@ export class TableManager {
   }
 
   /**
+   * Oyuncunun elindeki kağıtları tüm 3 sıra genelinde tek bir bütün olarak Sayıya Göre (A..K)
+   * veya Renge Göre (♠, ♥, ♣, ♦) akıllıca 3 sıraya böler.
+   */
+  private distributeSortedCardsIntoRows(cards: Card[], mode: 'rank' | 'suit'): string[][] {
+    if (cards.length === 0) return [[], [], []];
+
+    if (mode === 'rank') {
+      // Sayıya göre sıralı kağıtlarda aynı sayılı grupları (çift/üçlü) mümkün olduğunca aynı satırda tutarak 3 sıraya dağıt
+      const groups: Card[][] = [];
+      for (const c of cards) {
+        const keyRank = c.isPhysicalJoker ? 99 : c.rank;
+        const lastGroup = groups[groups.length - 1];
+        const lastRank =
+          lastGroup && lastGroup.length > 0
+            ? lastGroup[0].isPhysicalJoker
+              ? 99
+              : lastGroup[0].rank
+            : -1;
+        if (lastGroup && lastRank === keyRank) {
+          lastGroup.push(c);
+        } else {
+          groups.push([c]);
+        }
+      }
+
+      const rows: string[][] = [[], [], []];
+      const targets = cards.length === 11 ? [4, 4, 3] : [4, 3, 3];
+      let currentRow = 0;
+
+      for (const g of groups) {
+        if (
+          currentRow < 2 &&
+          rows[currentRow].length > 0 &&
+          rows[currentRow].length + g.length > targets[currentRow] + 1
+        ) {
+          currentRow++;
+        }
+        for (const c of g) {
+          if (currentRow < 2 && rows[currentRow].length >= targets[currentRow] && g.length === 1) {
+            currentRow++;
+          }
+          rows[currentRow].push(c.id);
+        }
+      }
+      return rows;
+    } else {
+      // Renge göre sıralı kağıtlarda aynı rengi kendi satırında tutmaya çalışarak 3 sıraya dağıt
+      const rows: string[][] = [[], [], []];
+      const targets = cards.length === 11 ? [4, 4, 3] : [4, 3, 3];
+      let idx = 0;
+      for (let r = 0; r < 3; r++) {
+        const count = targets[r];
+        rows[r] = cards.slice(idx, idx + count).map((c) => c.id);
+        idx += count;
+      }
+      return rows;
+    }
+  }
+
+  /**
    * Oyuncunun elindeki kağıtları kendi istediği sıraya (veya 3 sıraya) dizmesi
    */
   reorderPlayerHand(
@@ -1439,17 +1497,52 @@ export class TableManager {
       seat.hand = reordered;
     } else if (!orderedCardIds || orderedCardIds.length === 0) {
       if (!table.isAssisted) {
-        // Yardımsız modda otomatik per dizme kapalıdır, sadece sembol ve sayıya göre basit sıralar
+        // Yardımsız modda tüm 10/11 kağıdı TEK BİR BÜTÜN olarak Sayıya Göre (1..13, Joker) sırala!
+        // Kullanıcı tekrar basarsa Renk/Seri dizilimi ile Sayı dizilimi arasında geçiş yapar.
         const suitOrder: Record<string, number> = { S: 1, H: 2, C: 3, D: 4, J: 5 };
-        seat.hand.sort((a, b) => {
-          if (suitOrder[a.suit] !== suitOrder[b.suit]) {
+        const mode: 'rank' | 'suit' = seat.sortMode === 'rank' ? 'rank' : 'suit';
+        seat.sortMode = mode === 'rank' ? 'suit' : 'rank';
+
+        if (mode === 'rank') {
+          seat.hand.sort((a, b) => {
+            const rA = a.isPhysicalJoker ? 99 : a.rank;
+            const rB = b.isPhysicalJoker ? 99 : b.rank;
+            if (rA !== rB) return rA - rB;
             return suitOrder[a.suit] - suitOrder[b.suit];
-          }
-          return a.rank - b.rank;
-        });
-        seat.handRows = this.splitHandIntoDefaultRows(seat.hand);
+          });
+        } else {
+          seat.hand.sort((a, b) => {
+            if (suitOrder[a.suit] !== suitOrder[b.suit]) {
+              return suitOrder[a.suit] - suitOrder[b.suit];
+            }
+            return a.rank - b.rank;
+          });
+        }
+        seat.handRows = this.distributeSortedCardsIntoRows(seat.hand, mode);
+        this.syncSeatHandRows(seat);
       } else {
-        // Yardımlı modda Otomatik Per Diz: Her peri ayrı bir sıraya yerleştir!
+        // Yardımlı modda Otomatik Per Diz:
+        // Eğer 11 kağıt varsa ve 10 kağıtla el açılabiliyorsa (ör. 2♠-Joker-Joker-5♠ + Papaz),
+        // doğrudan o 10 kağıdın perlerini 3 sıraya diz ve atılacak 11. kağıdı (Papaz) 3. sıranın sonuna koy!
+        if (seat.hand.length === 11) {
+          const winCheck = findWinningDiscard(seat.hand, table.wildRank, seat.handRows);
+          if (winCheck.canWin && winCheck.discardCard && winCheck.evaluation) {
+            const melds = winCheck.evaluation.melds;
+            const discard = winCheck.discardCard;
+            seat.hand = [...winCheck.evaluation.orderedCards, discard];
+            const newRows: string[][] = [[], [], []];
+            melds.forEach((meld, idx) => {
+              const targetRow = Math.min(2, idx);
+              newRows[targetRow].push(...meld.map((c) => c.id));
+            });
+            newRows[2].push(discard.id);
+            seat.handRows = newRows;
+            this.syncSeatHandRows(seat);
+            this.sendTableStateToUser(table, userId);
+            return;
+          }
+        }
+
         const evalHand = evaluateHandOptimal(seat.hand, table.wildRank);
         seat.hand = evalHand.orderedCards;
         const newRows: string[][] = [[], [], []];
@@ -1563,12 +1656,18 @@ export class TableManager {
         const meldedIds = new Set(evalRes.melds.flat().map((c) => c.id));
         let canFinishNow = evalRes.canFinish;
         let winningDiscardCardId: string | null = null;
+        let displayPenalty = evalRes.penalty;
 
         if (viewerSeat.hand.length === 11) {
-          const winCheck = findWinningDiscard(viewerSeat.hand, table.wildRank);
+          const winCheck = findWinningDiscard(
+            viewerSeat.hand,
+            table.wildRank,
+            viewerSeat.handRows
+          );
           if (winCheck.canWin && winCheck.discardCard && winCheck.evaluation) {
             canFinishNow = true;
             winningDiscardCardId = winCheck.discardCard.id;
+            displayPenalty = 0;
             meldedIds.clear();
             for (const c of winCheck.evaluation.melds.flat()) {
               meldedIds.add(c.id);
@@ -1579,14 +1678,26 @@ export class TableManager {
         viewerEvaluation = {
           canFinish: canFinishNow,
           winningDiscardCardId,
-          penalty: evalRes.penalty,
+          penalty: displayPenalty,
           meldedCardIds: Array.from(meldedIds),
         };
       } else {
-        // Yardımsız (Usta) Modda ipucu verilmez; oyuncu kendi elini kontrol edip açar
+        // Yardımsız (Usta) Modda ipucu verilmez; ancak oyuncu 3 sırada geçerli bir el dizdiyse
+        // dışarıda kalan 11. kağıdı (`winningDiscardCardId`) el açarken kullanabilmek üzere belirle
+        let candidateDiscardId: string | null = null;
+        if (viewerSeat.hand.length === 11) {
+          const rowWin = evaluatePlayerRowsForFinish(
+            viewerSeat.hand,
+            viewerSeat.handRows,
+            table.wildRank
+          );
+          if (rowWin.canWinFromRows && rowWin.discardCard) {
+            candidateDiscardId = rowWin.discardCard.id;
+          }
+        }
         viewerEvaluation = {
           canFinish: viewerSeat.hand.length === 11,
-          winningDiscardCardId: null,
+          winningDiscardCardId: candidateDiscardId,
           penalty: -1,
           meldedCardIds: [],
         };

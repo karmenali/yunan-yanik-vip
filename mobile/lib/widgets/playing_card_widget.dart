@@ -1,9 +1,12 @@
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import '../models/game_models.dart';
 
+/// Zynga Poker / Bicycle Casino Standartlarında Temiz, Okunaklı İskambil Kağıdı Bileşeni
 class PlayingCardWidget extends StatelessWidget {
   final CardModel card;
   final int wildRank;
+  final bool showWildHints; // Yardımsız modda false olur; gösterge jokerini normal kağıt gibi gösterir
   final bool isSelected;
   final bool isMelded;
   final bool isNewlyDrawn;
@@ -16,230 +19,204 @@ class PlayingCardWidget extends StatelessWidget {
     super.key,
     required this.card,
     required this.wildRank,
+    this.showWildHints = true,
     this.isSelected = false,
     this.isMelded = false,
     this.isNewlyDrawn = false,
     this.isWinningDiscardCandidate = false,
-    this.width = 80,
-    this.height = 116,
+    this.width = 62,
+    this.height = 90,
     this.onTap,
   });
 
   @override
   Widget build(BuildContext context) {
-    final bool wild = card.isWild(wildRank);
-    final bool isRed =
-        !card.isPhysicalJoker && (card.suit == 'H' || card.suit == 'D');
-    final Color mainColor = card.isPhysicalJoker
-        ? const Color(0xFF7C3AED)
-        : isRed
-            ? const Color(0xFFD91B24)
+    final bool isPhysicalJoker = card.isPhysicalJoker;
+    // Yardımsız modda (showWildHints == false) sadece gerçek fiziksel Joker kağıdı Joker görünümündedir;
+    // Gösterge kağıdıyla aynı sayıdaki kağıtlar normal iskambil kağıdı olarak çizilir (kopya/ipucu verilmez!)
+    final bool isIndicatorWild =
+        showWildHints && !isPhysicalJoker && wildRank > 0 && card.rank == wildRank;
+    final bool showAsWild = isPhysicalJoker || isIndicatorWild;
+
+    final Color suitColor = isPhysicalJoker
+        ? const Color(0xFF6D28D9)
+        : (card.suit == 'hearts' || card.suit == 'diamonds')
+            ? const Color(0xFFDC2626)
             : const Color(0xFF111827);
 
-    Color borderColor = const Color(0xFFD1D5DB);
-    double borderWidth = 1.5;
+    // Çerçeve rengi ve kalınlığı
+    Color borderColor = const Color(0xFFD6D3C9);
+    double borderWidth = 1.1;
 
     if (isSelected) {
-      borderColor = const Color(0xFFFACC15);
-      borderWidth = 3.0;
-    } else if (isNewlyDrawn) {
-      borderColor = const Color(0xFF38BDF8);
-      borderWidth = 2.8;
+      borderColor = const Color(0xFFF59E0B);
+      borderWidth = 2.2;
     } else if (isWinningDiscardCandidate) {
       borderColor = const Color(0xFFEF4444);
-      borderWidth = 2.6;
+      borderWidth = 2.0;
     } else if (isMelded) {
-      borderColor = const Color(0xFFF59E0B);
-      borderWidth = 2.4;
-    } else if (wild) {
+      borderColor = const Color(0xFF10B981);
+      borderWidth = 1.9;
+    } else if (isIndicatorWild) {
       borderColor = const Color(0xFFD97706);
-      borderWidth = 2.2;
+      borderWidth = 1.6;
+    } else if (isNewlyDrawn) {
+      borderColor = const Color(0xFF38BDF8);
+      borderWidth = 1.7;
     }
 
-    Widget cardBody = Container(
+    final double radius = (width * 0.13).clamp(6.0, 11.0);
+    final double rankFontSize = (width * 0.27).clamp(11.0, 20.0);
+    final double cornerSuitSize = (width * 0.21).clamp(9.0, 15.0);
+    final double centerArtSize = (width * 0.44).clamp(16.0, 34.0);
+
+    final Widget cardBody = Container(
       width: width,
       height: height,
       decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(radius),
         gradient: LinearGradient(
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
-          colors: wild
-              ? [const Color(0xFFFFFBEB), const Color(0xFFFEF3C7)]
-              : [const Color(0xFFFFFFFF), const Color(0xFFF3F4F6)],
+          colors: isSelected
+              ? const [Color(0xFFFFFBEB), Color(0xFFFEF3C7)]
+              : isPhysicalJoker
+                  ? const [Color(0xFFFAF5FF), Color(0xFFF3E8FF)]
+                  : isIndicatorWild
+                      ? const [Color(0xFFFFFBEB), Color(0xFFFEF9C3)]
+                      : const [Color(0xFFFCFBF9), Color(0xFFF4F1EA)],
         ),
-        borderRadius: BorderRadius.circular(width * 0.12),
         border: Border.all(color: borderColor, width: borderWidth),
         boxShadow: [
           BoxShadow(
             color: isSelected
-                ? const Color(0xFFFACC15).withValues(alpha: 0.7)
+                ? const Color(0xFFF59E0B).withValues(alpha: 0.42)
                 : isMelded
-                    ? const Color(0xFFF59E0B).withValues(alpha: 0.45)
-                    : Colors.black.withValues(alpha: 0.65),
-            blurRadius: isSelected ? 14 : 8,
-            offset: const Offset(-2, 4),
+                    ? const Color(0xFF10B981).withValues(alpha: 0.25)
+                    : Colors.black.withValues(alpha: 0.36),
+            blurRadius: isSelected ? 8 : 4,
+            offset: Offset(0, isSelected ? 3 : 2),
           ),
         ],
       ),
       child: ClipRRect(
-        borderRadius: BorderRadius.circular(width * 0.105),
+        borderRadius: BorderRadius.circular(radius - 1),
         child: Stack(
           children: [
-            // İç İnce Çerçeve (Zynga Poker İskambil Estetiği)
+            // İnce klasik iç çerçeve
             Positioned.fill(
-              child: Container(
-                margin: const EdgeInsets.all(3.5),
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(width * 0.08),
-                  border: Border.all(
-                    color: wild
-                        ? const Color(0xFFF59E0B).withValues(alpha: 0.35)
-                        : Colors.black.withValues(alpha: 0.06),
-                    width: 0.8,
-                  ),
-                ),
-              ),
-            ),
-
-            // SOL ÜST KÖŞE: Yelpazede üst üste bindiğinde %100 okunan keskin Sayı + Sembol şeridi
-            Positioned(
-              top: width * 0.055,
-              left: width * 0.075,
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.center,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    card.isPhysicalJoker ? 'JKR' : card.rankLabel,
-                    style: TextStyle(
-                      color: mainColor,
-                      fontWeight: FontWeight.w900,
-                      fontSize: card.isPhysicalJoker
-                          ? width * 0.19
-                          : (card.rank == 10 ? width * 0.29 : width * 0.32),
-                      height: 0.95,
-                      letterSpacing: card.rank == 10 ? -1.4 : -0.5,
+              child: Padding(
+                padding: EdgeInsets.all((width * 0.055).clamp(2.5, 4.5)),
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular((radius - 3).clamp(3.0, 8.0)),
+                    border: Border.all(
+                      color: suitColor.withValues(alpha: 0.08),
+                      width: 0.8,
                     ),
                   ),
-                  const SizedBox(height: 1),
-                  Text(
-                    card.suitSymbol,
-                    style: TextStyle(
-                      color: mainColor,
-                      fontSize: width * 0.27,
-                      height: 0.95,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-
-            // ORTA-SAĞ BÜYÜK İSKAMBİL SEMBOLÜ (Kraliyet / Zynga Stili)
-            Align(
-              alignment: const Alignment(0.28, 0.22),
-              child: Text(
-                card.isPhysicalJoker ? '🃏' : card.suitSymbol,
-                style: TextStyle(
-                  color: mainColor.withValues(alpha: 0.92),
-                  fontSize: width * 0.50,
-                  height: 1.0,
                 ),
               ),
             ),
 
-            // SAĞ ALT KÖŞE TERS SAYI
+            // SOL ÜST KÖŞE İNDEKSİ (Sayı + Sembol)
             Positioned(
-              bottom: width * 0.05,
-              right: width * 0.07,
-              child: Transform.rotate(
-                angle: 3.14159,
-                child: Text(
-                  card.isPhysicalJoker ? '★' : card.rankLabel,
-                  style: TextStyle(
-                    color: mainColor.withValues(alpha: 0.75),
-                    fontWeight: FontWeight.w900,
-                    fontSize: width * 0.18,
-                    height: 1.0,
-                  ),
-                ),
+              top: (height * 0.045).clamp(2.5, 5.0),
+              left: (width * 0.075).clamp(3.5, 6.0),
+              child: _buildCornerIndex(
+                isPhysicalJoker: isPhysicalJoker,
+                suitColor: suitColor,
+                rankFontSize: rankFontSize,
+                cornerSuitSize: cornerSuitSize,
               ),
             ),
 
-            // JOKER TACI ROZETİ
-            if (wild)
+            // SAĞ ALT KÖŞE TERS İNDEKS (Gerçek İskambil Kağıdı Simetrisi)
+            if (height >= 64)
+              Positioned(
+                bottom: (height * 0.045).clamp(2.5, 5.0),
+                right: (width * 0.075).clamp(3.5, 6.0),
+                child: Transform.rotate(
+                  angle: math.pi,
+                  child: _buildCornerIndex(
+                    isPhysicalJoker: isPhysicalJoker,
+                    suitColor: suitColor,
+                    rankFontSize: rankFontSize * 0.85,
+                    cornerSuitSize: cornerSuitSize * 0.85,
+                  ),
+                ),
+              ),
+
+            // ORTA İSKAMBİL SANATI (A, J/Q/K, Sayı veya Joker)
+            Center(
+              child: _buildCenterCardArt(
+                isPhysicalJoker: isPhysicalJoker,
+                suitColor: suitColor,
+                centerArtSize: centerArtSize,
+              ),
+            ),
+
+            // YARDIMLI MODDA GÖSTERGE JOKERİ TAÇ İŞARETİ (Yardımsız modda asla görünmez!)
+            if (showAsWild && (isPhysicalJoker || showWildHints))
               Positioned(
                 top: 3,
                 right: 3,
                 child: Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 4, vertical: 1.5),
+                  padding: const EdgeInsets.symmetric(horizontal: 3.5, vertical: 1),
                   decoration: BoxDecoration(
-                    gradient: const LinearGradient(
-                      colors: [Color(0xFFF59E0B), Color(0xFFB45309)],
-                    ),
-                    borderRadius: BorderRadius.circular(5),
-                    boxShadow: const [
-                      BoxShadow(color: Colors.black38, blurRadius: 3),
-                    ],
+                    color: isPhysicalJoker
+                        ? const Color(0xFF6D28D9)
+                        : const Color(0xFFD97706),
+                    borderRadius: BorderRadius.circular(4),
                   ),
                   child: Text(
-                    '👑 JKR',
+                    isPhysicalJoker ? 'JKR' : '👑',
                     style: TextStyle(
                       color: Colors.white,
-                      fontSize: (width * 0.105).clamp(7.0, 9.5),
+                      fontSize: (width * 0.125).clamp(6.5, 8.5),
                       fontWeight: FontWeight.w900,
+                      height: 1.0,
                     ),
                   ),
                 ),
               ),
 
-            // YENİ ÇEKİLEN KAĞIT PARILTI ROZETİ
-            if (isNewlyDrawn)
+            // YARDIMLI MODDA PER ONAY NOKTASI
+            if (isMelded && !showAsWild)
               Positioned(
-                top: wild ? 18 : 3,
-                right: 3,
+                top: 4,
+                right: 4,
                 child: Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 4, vertical: 1.5),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF0284C7),
-                    borderRadius: BorderRadius.circular(5),
-                  ),
-                  child: Text(
-                    'YENİ',
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontSize: (width * 0.10).clamp(7.0, 9.0),
-                      fontWeight: FontWeight.w900,
-                    ),
+                  width: (width * 0.13).clamp(6.0, 9.0),
+                  height: (width * 0.13).clamp(6.0, 9.0),
+                  decoration: const BoxDecoration(
+                    color: Color(0xFF10B981),
+                    shape: BoxShape.circle,
                   ),
                 ),
               ),
 
-            // PER ŞERİDİ (Altın-Zümrüt İnce Alt Bant)
-            if (isMelded)
+            // YARDIMLI MODDA "BU KAĞIDI ATARSAN BİTERSİN" İŞARETİ
+            if (isWinningDiscardCandidate)
               Positioned(
-                bottom: 0,
+                bottom: 3,
                 left: 0,
                 right: 0,
-                child: Container(
-                  padding: const EdgeInsets.symmetric(vertical: 2),
-                  decoration: BoxDecoration(
-                    gradient: LinearGradient(
-                      colors: [
-                        const Color(0xFFD97706).withValues(alpha: 0.95),
-                        const Color(0xFFF59E0B).withValues(alpha: 0.95),
-                      ],
+                child: Center(
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFEF4444),
+                      borderRadius: BorderRadius.circular(4),
                     ),
-                  ),
-                  child: Text(
-                    '✓ PER',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                      color: Colors.black,
-                      fontSize: (width * 0.105).clamp(7.0, 9.5),
-                      fontWeight: FontWeight.w900,
-                      letterSpacing: 0.4,
+                    child: Text(
+                      'AT & AÇ',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: (width * 0.12).clamp(6.5, 8.5),
+                        fontWeight: FontWeight.w900,
+                        height: 1.1,
+                      ),
                     ),
                   ),
                 ),
@@ -249,154 +226,305 @@ class PlayingCardWidget extends StatelessWidget {
       ),
     );
 
-    if (isNewlyDrawn) {
-      cardBody = TweenAnimationBuilder<double>(
-        tween: Tween(begin: 0.0, end: 1.0),
-        duration: const Duration(milliseconds: 360),
-        curve: Curves.easeOutBack,
-        builder: (context, val, child) {
-          return Transform.translate(
-            offset: Offset(0, -36 * (1.0 - val)),
-            child: Transform.scale(
-              scale: 0.85 + (0.15 * val),
-              child: child,
+    if (onTap == null) return cardBody;
+    return GestureDetector(onTap: onTap, child: cardBody);
+  }
+
+  Widget _buildCornerIndex({
+    required bool isPhysicalJoker,
+    required Color suitColor,
+    required double rankFontSize,
+    required double cornerSuitSize,
+  }) {
+    if (isPhysicalJoker) {
+      return Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            'J',
+            style: TextStyle(
+              color: suitColor,
+              fontSize: rankFontSize * 0.92,
+              fontWeight: FontWeight.w900,
+              height: 0.95,
             ),
-          );
-        },
-        child: cardBody,
+          ),
+          Text(
+            '★',
+            style: TextStyle(
+              color: const Color(0xFFD97706),
+              fontSize: cornerSuitSize * 0.9,
+              height: 0.95,
+            ),
+          ),
+        ],
       );
     }
 
-    if (onTap != null) {
-      return GestureDetector(
-        onTap: onTap,
-        child: cardBody,
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.center,
+      children: [
+        Text(
+          card.rankLabel,
+          style: TextStyle(
+            color: suitColor,
+            fontSize: rankFontSize,
+            fontWeight: FontWeight.w900,
+            letterSpacing: card.rank == 10 ? -1.1 : -0.3,
+            height: 0.95,
+          ),
+        ),
+        Text(
+          card.suitSymbol,
+          style: TextStyle(
+            color: suitColor,
+            fontSize: cornerSuitSize,
+            fontWeight: FontWeight.bold,
+            height: 0.95,
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildCenterCardArt({
+    required bool isPhysicalJoker,
+    required Color suitColor,
+    required double centerArtSize,
+  }) {
+    if (isPhysicalJoker) {
+      return Container(
+        width: centerArtSize * 1.15,
+        height: centerArtSize * 1.15,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          gradient: const LinearGradient(
+            colors: [Color(0xFF7C3AED), Color(0xFFD97706)],
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+          ),
+          boxShadow: [
+            BoxShadow(
+              color: const Color(0xFF7C3AED).withValues(alpha: 0.25),
+              blurRadius: 4,
+            ),
+          ],
+        ),
+        child: Center(
+          child: Text(
+            '🃏',
+            style: TextStyle(fontSize: centerArtSize * 0.68, height: 1.0),
+          ),
+        ),
       );
     }
-    return cardBody;
+
+    // Kraliyet kağıtları (J, Q, K) için şık çerçeveli madalyon
+    if (card.rank >= 11 && card.rank <= 13) {
+      final String crownIcon = card.rank == 13
+          ? '♔'
+          : card.rank == 12
+              ? '♕'
+              : '♘';
+      return Container(
+        width: centerArtSize * 1.12,
+        height: centerArtSize * 1.28,
+        decoration: BoxDecoration(
+          color: suitColor.withValues(alpha: 0.05),
+          borderRadius: BorderRadius.circular(6),
+          border: Border.all(
+            color: const Color(0xFFD4AF37).withValues(alpha: 0.55),
+            width: 1.0,
+          ),
+        ),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Text(
+              crownIcon,
+              style: TextStyle(
+                color: const Color(0xFFB45309),
+                fontSize: centerArtSize * 0.52,
+                height: 0.95,
+              ),
+            ),
+            Text(
+              card.suitSymbol,
+              style: TextStyle(
+                color: suitColor,
+                fontSize: centerArtSize * 0.56,
+                height: 1.0,
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    // As (A) için özel rozetli büyük sembol
+    if (card.rank == 1) {
+      return Container(
+        width: centerArtSize * 1.15,
+        height: centerArtSize * 1.15,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          color: suitColor.withValues(alpha: 0.06),
+          border: Border.all(
+            color: suitColor.withValues(alpha: 0.18),
+            width: 1.0,
+          ),
+        ),
+        child: Center(
+          child: Text(
+            card.suitSymbol,
+            style: TextStyle(
+              color: suitColor,
+              fontSize: centerArtSize * 0.78,
+              height: 1.0,
+            ),
+          ),
+        ),
+      );
+    }
+
+    // 2..10 sayı kağıtları için ferah, göz yormayan klasik merkez sembolü
+    return Text(
+      card.suitSymbol,
+      style: TextStyle(
+        color: suitColor.withValues(alpha: 0.85),
+        fontSize: centerArtSize * 0.86,
+        height: 1.0,
+      ),
+    );
   }
 }
 
-/// Zynga UI tasarımındaki gibi 3 boyutlu katmanlı kırmızı-altın Kapalı Deste görünümü
+/// Lüks Kraliyet Laciverti & Altın Filigranlı Kapalı İskambil Sırtı
 class CardBackWidget extends StatelessWidget {
   final double width;
   final double height;
-  final String? badgeText;
   final int? deckCount;
+  final VoidCallback? onTap;
 
   const CardBackWidget({
     super.key,
-    this.width = 76,
-    this.height = 112,
-    this.badgeText,
+    this.width = 58,
+    this.height = 84,
     this.deckCount,
+    this.onTap,
   });
 
   @override
   Widget build(BuildContext context) {
-    return SizedBox(
-      width: width + 6,
-      height: height + 8,
+    final double radius = (width * 0.13).clamp(6.0, 11.0);
+
+    return GestureDetector(
+      onTap: onTap,
       child: Stack(
+        clipBehavior: Clip.none,
         children: [
-          // 3D Alt Deste Katmanları (Kalın kağıt yığını efekti)
-          Positioned(
-            left: 5,
-            top: 6,
-            child: Container(
-              width: width,
-              height: height,
-              decoration: BoxDecoration(
-                color: const Color(0xFFE5E7EB),
-                borderRadius: BorderRadius.circular(width * 0.12),
-                border: Border.all(color: Colors.black45, width: 1),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.65),
-                    blurRadius: 10,
-                    offset: const Offset(0, 5),
-                  ),
-                ],
-              ),
+          if (deckCount != null && deckCount! > 2)
+            Positioned(
+              left: 3,
+              top: 3,
+              child: _buildSingleBack(radius, darken: 0.25),
             ),
-          ),
-          Positioned(
-            left: 2.5,
-            top: 3,
-            child: Container(
-              width: width,
-              height: height,
-              decoration: BoxDecoration(
-                color: const Color(0xFFF9FAFB),
-                borderRadius: BorderRadius.circular(width * 0.12),
-                border: Border.all(color: Colors.black38, width: 1),
-              ),
+          if (deckCount != null && deckCount! > 1)
+            Positioned(
+              left: 1.5,
+              top: 1.5,
+              child: _buildSingleBack(radius, darken: 0.12),
             ),
-          ),
-          // En Üstteki Kraliyet Kırmızı & Altın İşlemeli Sırt Kartı
-          Positioned(
-            left: 0,
-            top: 0,
-            child: Container(
-              width: width,
-              height: height,
-              decoration: BoxDecoration(
-                gradient: const LinearGradient(
-                  begin: Alignment.topLeft,
-                  end: Alignment.bottomRight,
-                  colors: [
-                    Color(0xFFB91C1C),
-                    Color(0xFF7F1D1D),
-                    Color(0xFF450A0A),
-                  ],
-                ),
-                borderRadius: BorderRadius.circular(width * 0.12),
-                border: Border.all(color: const Color(0xFFFDE047), width: 2.0),
-              ),
-              child: Stack(
-                alignment: Alignment.center,
-                children: [
-                  // Altın Filigran Çerçeve
-                  Container(
-                    margin: const EdgeInsets.all(5),
-                    decoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(width * 0.08),
-                      border: Border.all(
-                        color: const Color(0xFFFDE047).withValues(alpha: 0.65),
-                        width: 1.3,
-                      ),
-                    ),
-                  ),
-                  // Ortadaki Altın Madalyon (Kalan Kağıt Sayısı)
-                  Container(
-                    width: width * 0.54,
-                    height: width * 0.54,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      gradient: const RadialGradient(
-                        colors: [Color(0xFF991B1B), Color(0xFF450A0A)],
-                      ),
-                      border: Border.all(
-                        color: const Color(0xFFFACC15),
-                        width: 1.8,
-                      ),
-                    ),
-                    child: Center(
-                      child: Text(
-                        deckCount != null ? '$deckCount' : (badgeText ?? '⚜️'),
-                        style: TextStyle(
-                          color: const Color(0xFFFDE047),
-                          fontWeight: FontWeight.w900,
-                          fontSize: width * 0.24,
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
+          _buildSingleBack(radius, showCount: deckCount != null),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSingleBack(
+    double radius, {
+    double darken = 0.0,
+    bool showCount = false,
+  }) {
+    return Container(
+      width: width,
+      height: height,
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(radius),
+        color: const Color(0xFFF8FAFC),
+        border: Border.all(
+          color: const Color(0xFFE2E8F0),
+          width: 1.6,
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.42),
+            blurRadius: 5,
+            offset: const Offset(0, 3),
           ),
         ],
+      ),
+      padding: const EdgeInsets.all(2.5),
+      child: Container(
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular((radius - 2.5).clamp(4.0, 9.0)),
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [
+              Color.lerp(const Color(0xFF1E3A8A), Colors.black, darken)!,
+              Color.lerp(const Color(0xFF0F172A), Colors.black, darken)!,
+            ],
+          ),
+          border: Border.all(
+            color: const Color(0xFFD4AF37).withValues(alpha: 0.75),
+            width: 1.0,
+          ),
+        ),
+        child: Center(
+          child: showCount && deckCount != null
+              ? Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: Colors.black.withValues(alpha: 0.65),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(
+                      color: const Color(0xFFD4AF37),
+                      width: 1,
+                    ),
+                  ),
+                  child: Text(
+                    '$deckCount',
+                    style: const TextStyle(
+                      color: Color(0xFFFDE047),
+                      fontWeight: FontWeight.w900,
+                      fontSize: 11,
+                    ),
+                  ),
+                )
+              : Container(
+                  width: width * 0.46,
+                  height: width * 0.46,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    border: Border.all(
+                      color: const Color(0xFFD4AF37).withValues(alpha: 0.65),
+                      width: 1.1,
+                    ),
+                  ),
+                  child: Center(
+                    child: Text(
+                      '♠',
+                      style: TextStyle(
+                        color: const Color(0xFFD4AF37).withValues(alpha: 0.85),
+                        fontSize: (width * 0.24).clamp(10.0, 16.0),
+                      ),
+                    ),
+                  ),
+                ),
+        ),
       ),
     );
   }
