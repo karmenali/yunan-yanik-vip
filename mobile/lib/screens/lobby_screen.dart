@@ -153,70 +153,271 @@ class _LobbyScreenState extends State<LobbyScreen> {
   // 🔔 BİLDİRİMLER & DAVETLER MODALI
   // ===========================================================================
   Future<void> _showNotificationsSheet() async {
-    showModalBottomSheet(
+    List<Map<String, dynamic>> requests = [];
+    List<Map<String, dynamic>> notifications = [];
+    bool isLoading = true;
+
+    await showModalBottomSheet(
       context: context,
       backgroundColor: const Color(0xFF0A2419),
+      isScrollControlled: true,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(22)),
       ),
       builder: (ctx) {
-        return Padding(
-          padding: const EdgeInsets.all(18),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  const Text(
-                    '🔔 Bildirimler & Davetler',
-                    style: TextStyle(
-                      color: Color(0xFFFDE047),
-                      fontWeight: FontWeight.w900,
-                      fontSize: 17,
-                    ),
-                  ),
-                  IconButton(
-                    onPressed: () => Navigator.pop(ctx),
-                    icon: const Icon(Icons.close, color: Colors.white70),
-                  ),
-                ],
-              ),
-              const Divider(color: Colors.white24),
-              const SizedBox(height: 12),
-              Container(
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: Colors.black38,
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: const Color(0xFFD4AF37).withValues(alpha: 0.4)),
-                ),
-                child: Row(
+        return StatefulBuilder(
+          builder: (ctx, setSheetState) {
+            void loadNotifs() async {
+              try {
+                final [rList, nList] = await Future.wait([
+                  GameService.instance.getPendingFriendRequests(),
+                  GameService.instance.getNotifications(),
+                ]);
+                if (ctx.mounted) {
+                  setSheetState(() {
+                    requests = rList;
+                    notifications = nList;
+                    isLoading = false;
+                  });
+                }
+              } catch (_) {
+                if (ctx.mounted) {
+                  setSheetState(() => isLoading = false);
+                }
+              }
+            }
+
+            if (isLoading) {
+              loadNotifs();
+            }
+
+            return Padding(
+              padding: const EdgeInsets.all(18),
+              child: SizedBox(
+                height: MediaQuery.sizeOf(ctx).height * 0.72,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const Icon(Icons.mark_chat_unread, color: Color(0xFFFDE047)),
-                    const SizedBox(width: 12),
-                    const Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            'Hoş Geldiniz!',
-                            style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
-                          ),
-                          Text(
-                            'Arkadaşlarınızı oyuna davet edebilir ve anlık oyun odası bildirimleri alabilirsiniz.',
-                            style: TextStyle(color: Colors.white70, fontSize: 11),
-                          ),
-                        ],
-                      ),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        const Row(
+                          children: [
+                            Icon(Icons.notifications_active, color: Color(0xFFFDE047), size: 22),
+                            SizedBox(width: 8),
+                            Text(
+                              'Bildirimler & İstekler',
+                              style: TextStyle(
+                                color: Color(0xFFFDE047),
+                                fontWeight: FontWeight.w900,
+                                fontSize: 17,
+                              ),
+                            ),
+                          ],
+                        ),
+                        Row(
+                          children: [
+                            if (notifications.isNotEmpty)
+                              TextButton(
+                                onPressed: () async {
+                                  await GameService.instance.markNotificationsRead();
+                                  loadNotifs();
+                                },
+                                child: const Text(
+                                  'Tümünü Oku',
+                                  style: TextStyle(color: Color(0xFFFDE047), fontSize: 11.5),
+                                ),
+                              ),
+                            IconButton(
+                              onPressed: () => Navigator.pop(ctx),
+                              icon: const Icon(Icons.close, color: Colors.white70),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                    const Divider(color: Colors.white24),
+                    const SizedBox(height: 8),
+
+                    Expanded(
+                      child: isLoading
+                          ? const Center(child: CircularProgressIndicator(color: Color(0xFFD4AF37)))
+                          : ListView(
+                              children: [
+                                // 1. GELEN ARKADAŞLIK İSTEKLERİ
+                                if (requests.isNotEmpty) ...[
+                                  Text(
+                                    'Arkadaşlık İstekleri (${requests.length})',
+                                    style: const TextStyle(
+                                      color: Color(0xFFFDE047),
+                                      fontWeight: FontWeight.bold,
+                                      fontSize: 13,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 8),
+                                  ...requests.map((req) {
+                                    final username = req['username']?.toString() ?? 'Oyuncu';
+                                    final avatarKey = req['avatar']?.toString() ?? 'lion';
+                                    final avatar = VipAvatar.fromKey(avatarKey);
+                                    final reqId = req['id'].toString();
+
+                                    return Container(
+                                      margin: const EdgeInsets.only(bottom: 8),
+                                      padding: const EdgeInsets.all(12),
+                                      decoration: BoxDecoration(
+                                        color: Colors.black45,
+                                        borderRadius: BorderRadius.circular(12),
+                                        border: Border.all(
+                                          color: const Color(0xFFD4AF37).withValues(alpha: 0.5),
+                                        ),
+                                      ),
+                                      child: Row(
+                                        children: [
+                                          Text(avatar.emoji, style: const TextStyle(fontSize: 24)),
+                                          const SizedBox(width: 10),
+                                          Expanded(
+                                            child: Column(
+                                              crossAxisAlignment: CrossAxisAlignment.start,
+                                              children: [
+                                                Text(
+                                                  username,
+                                                  style: const TextStyle(
+                                                    color: Colors.white,
+                                                    fontWeight: FontWeight.bold,
+                                                    fontSize: 13.5,
+                                                  ),
+                                                ),
+                                                const Text(
+                                                  'Arkadaşlık isteği gönderdi',
+                                                  style: TextStyle(
+                                                    color: Colors.white70,
+                                                    fontSize: 11,
+                                                  ),
+                                                ),
+                                              ],
+                                            ),
+                                          ),
+                                          ElevatedButton(
+                                            style: ElevatedButton.styleFrom(
+                                              backgroundColor: const Color(0xFF10B981),
+                                              foregroundColor: Colors.white,
+                                              padding: const EdgeInsets.symmetric(
+                                                horizontal: 10,
+                                                vertical: 6,
+                                              ),
+                                              shape: RoundedRectangleBorder(
+                                                borderRadius: BorderRadius.circular(8),
+                                              ),
+                                            ),
+                                            onPressed: () async {
+                                              await GameService.instance.respondFriendRequest(reqId, true);
+                                              loadNotifs();
+                                            },
+                                            child: const Text('Kabul Et', style: TextStyle(fontSize: 11)),
+                                          ),
+                                          const SizedBox(width: 6),
+                                          OutlinedButton(
+                                            style: OutlinedButton.styleFrom(
+                                              foregroundColor: Colors.white70,
+                                              side: const BorderSide(color: Colors.white24),
+                                              padding: const EdgeInsets.symmetric(
+                                                horizontal: 10,
+                                                vertical: 6,
+                                              ),
+                                              shape: RoundedRectangleBorder(
+                                                borderRadius: BorderRadius.circular(8),
+                                              ),
+                                            ),
+                                            onPressed: () async {
+                                              await GameService.instance.respondFriendRequest(reqId, false);
+                                              loadNotifs();
+                                            },
+                                            child: const Text('Reddet', style: TextStyle(fontSize: 11)),
+                                          ),
+                                        ],
+                                      ),
+                                    );
+                                  }),
+                                  const SizedBox(height: 16),
+                                ],
+
+                                // 2. GEÇMİŞ BİLDİRİMLER
+                                Text(
+                                  'Bildirim Geçmişi (${notifications.length})',
+                                  style: const TextStyle(
+                                    color: Colors.white70,
+                                    fontWeight: FontWeight.bold,
+                                    fontSize: 13,
+                                  ),
+                                ),
+                                const SizedBox(height: 8),
+                                if (notifications.isEmpty && requests.isEmpty)
+                                  const Padding(
+                                    padding: EdgeInsets.symmetric(vertical: 40),
+                                    child: Center(
+                                      child: Text(
+                                        'Henüz okunmamış bir bildiriminiz bulunmuyor.',
+                                        style: TextStyle(color: Colors.white54, fontSize: 13),
+                                      ),
+                                    ),
+                                  )
+                                else
+                                  ...notifications.map((n) {
+                                    final isRead = n['is_read'] == true;
+                                    return Container(
+                                      margin: const EdgeInsets.only(bottom: 8),
+                                      padding: const EdgeInsets.all(12),
+                                      decoration: BoxDecoration(
+                                        color: isRead ? Colors.black26 : const Color(0xFF133827),
+                                        borderRadius: BorderRadius.circular(12),
+                                        border: Border.all(
+                                          color: isRead ? Colors.white12 : const Color(0xFF10B981),
+                                        ),
+                                      ),
+                                      child: Row(
+                                        crossAxisAlignment: CrossAxisAlignment.start,
+                                        children: [
+                                          Icon(
+                                            isRead ? Icons.notifications_none : Icons.notifications_active,
+                                            color: isRead ? Colors.white38 : const Color(0xFFFDE047),
+                                            size: 20,
+                                          ),
+                                          const SizedBox(width: 10),
+                                          Expanded(
+                                            child: Column(
+                                              crossAxisAlignment: CrossAxisAlignment.start,
+                                              children: [
+                                                Text(
+                                                  n['title']?.toString() ?? 'Bildirim',
+                                                  style: TextStyle(
+                                                    color: isRead ? Colors.white70 : Colors.white,
+                                                    fontWeight: FontWeight.bold,
+                                                    fontSize: 12.5,
+                                                  ),
+                                                ),
+                                                const SizedBox(height: 2),
+                                                Text(
+                                                  n['message']?.toString() ?? '',
+                                                  style: TextStyle(
+                                                    color: isRead ? Colors.white54 : Colors.white70,
+                                                    fontSize: 11,
+                                                  ),
+                                                ),
+                                              ],
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    );
+                                  }),
+                              ],
+                            ),
                     ),
                   ],
                 ),
               ),
-              const SizedBox(height: 20),
-            ],
-          ),
+            );
+          },
         );
       },
     );
@@ -357,12 +558,12 @@ class _LobbyScreenState extends State<LobbyScreen> {
                             final name = searchCtrl.text.trim();
                             if (name.isEmpty) return;
                             try {
-                              await GameService.instance.addFriend(name);
+                              final res = await GameService.instance.sendFriendRequest(name);
                               searchCtrl.clear();
                               setSheetState(() {
                                 isSearching = false;
                                 searchResults = [];
-                                statusMessage = '✅ $name arkadaş listenize eklendi!';
+                                statusMessage = '✅ ${res['message']}';
                               });
                               loadData();
                             } catch (e) {
@@ -371,7 +572,7 @@ class _LobbyScreenState extends State<LobbyScreen> {
                               });
                             }
                           },
-                          child: const Text('Ekle', style: TextStyle(fontWeight: FontWeight.bold)),
+                          child: const Text('İstek Gönder', style: TextStyle(fontWeight: FontWeight.bold)),
                         ),
                       ],
                     ),
@@ -413,43 +614,68 @@ class _LobbyScreenState extends State<LobbyScreen> {
                                     )
                                   : ListView.builder(
                                       itemCount: searchResults.length,
-                                      itemBuilder: (_, i) => _buildRealUserTile(
-                                        searchResults[i],
-                                        onAdd: () async {
-                                          try {
-                                            await GameService.instance.addFriend(searchResults[i]['username']);
-                                            loadData();
-                                            setSheetState(() {
-                                              statusMessage = '✅ ${searchResults[i]['username']} eklendi!';
-                                            });
-                                          } catch (e) {
-                                            setSheetState(() => statusMessage = '❌ $e');
-                                          }
-                                        },
-                                      ),
+                                      itemBuilder: (_, i) {
+                                        final u = searchResults[i];
+                                        final uid = u['id']?.toString() ?? '';
+                                        final isFriend = friends.any((f) => f['id']?.toString() == uid);
+                                        final isSent = GameService.instance.sentFriendRequestUserIds.contains(uid);
+
+                                        return _buildRealUserTile(
+                                          u,
+                                          isAlreadyFriend: isFriend,
+                                          isRequestSent: isSent,
+                                          onAdd: (isFriend || isSent)
+                                              ? null
+                                              : () async {
+                                                  try {
+                                                    final res = await GameService.instance.sendFriendRequest(u['username']);
+                                                    loadData();
+                                                    setSheetState(() {
+                                                      statusMessage = '✅ ${res['message']}';
+                                                    });
+                                                  } catch (e) {
+                                                    setSheetState(() => statusMessage = '❌ $e');
+                                                  }
+                                                },
+                                        );
+                                      },
                                     )
                               : friends.isNotEmpty
                                   ? ListView.builder(
                                       itemCount: friends.length,
-                                      itemBuilder: (_, i) => _buildRealUserTile(friends[i]),
+                                      itemBuilder: (_, i) => _buildRealUserTile(
+                                        friends[i],
+                                        isAlreadyFriend: true,
+                                      ),
                                     )
                                   : onlineUsers.isNotEmpty
                                       ? ListView.builder(
                                           itemCount: onlineUsers.length,
-                                          itemBuilder: (_, i) => _buildRealUserTile(
-                                            onlineUsers[i],
-                                            onAdd: () async {
-                                              try {
-                                                await GameService.instance.addFriend(onlineUsers[i]['username']);
-                                                loadData();
-                                                setSheetState(() {
-                                                  statusMessage = '✅ ${onlineUsers[i]['username']} eklendi!';
-                                                });
-                                              } catch (e) {
-                                                setSheetState(() => statusMessage = '❌ $e');
-                                              }
-                                            },
-                                          ),
+                                          itemBuilder: (_, i) {
+                                            final u = onlineUsers[i];
+                                            final uid = u['id']?.toString() ?? '';
+                                            final isFriend = friends.any((f) => f['id']?.toString() == uid);
+                                            final isSent = GameService.instance.sentFriendRequestUserIds.contains(uid);
+
+                                            return _buildRealUserTile(
+                                              u,
+                                              isAlreadyFriend: isFriend,
+                                              isRequestSent: isSent,
+                                              onAdd: (isFriend || isSent)
+                                                  ? null
+                                                  : () async {
+                                                      try {
+                                                        final res = await GameService.instance.sendFriendRequest(u['username']);
+                                                        loadData();
+                                                        setSheetState(() {
+                                                          statusMessage = '✅ ${res['message']}';
+                                                        });
+                                                      } catch (e) {
+                                                        setSheetState(() => statusMessage = '❌ $e');
+                                                      }
+                                                    },
+                                            );
+                                          },
                                         )
                                       : const Center(
                                           child: Padding(
@@ -472,7 +698,12 @@ class _LobbyScreenState extends State<LobbyScreen> {
     );
   }
 
-  Widget _buildRealUserTile(Map<String, dynamic> user, {VoidCallback? onAdd}) {
+  Widget _buildRealUserTile(
+    Map<String, dynamic> user, {
+    VoidCallback? onAdd,
+    bool isAlreadyFriend = false,
+    bool isRequestSent = false,
+  }) {
     final username = user['username']?.toString() ?? 'Oyuncu';
     final avatarKey = user['avatar']?.toString() ?? 'lion';
     final avatar = VipAvatar.fromKey(avatarKey);
@@ -511,9 +742,37 @@ class _LobbyScreenState extends State<LobbyScreen> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  username,
-                  style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 13),
+                Row(
+                  children: [
+                    Flexible(
+                      child: Text(
+                        username,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 13,
+                        ),
+                      ),
+                    ),
+                    if (isAlreadyFriend) ...[
+                      const SizedBox(width: 6),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF065F46),
+                          borderRadius: BorderRadius.circular(6),
+                        ),
+                        child: const Text(
+                          'Arkadaş',
+                          style: TextStyle(
+                            color: Color(0xFF34D399),
+                            fontSize: 9,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ],
                 ),
                 Text(
                   isOnline ? 'Çevrimiçi' : 'Çevrimdışı',
@@ -525,7 +784,26 @@ class _LobbyScreenState extends State<LobbyScreen> {
               ],
             ),
           ),
-          if (onAdd != null)
+          if (isRequestSent)
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+              decoration: BoxDecoration(
+                color: Colors.white12,
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: const Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.hourglass_top_rounded, color: Colors.white70, size: 13),
+                  SizedBox(width: 4),
+                  Text(
+                    'İstek İletildi',
+                    style: TextStyle(color: Colors.white70, fontSize: 10.5, fontWeight: FontWeight.bold),
+                  ),
+                ],
+              ),
+            )
+          else if (onAdd != null)
             ElevatedButton.icon(
               style: ElevatedButton.styleFrom(
                 backgroundColor: const Color(0xFFD4AF37),
@@ -535,7 +813,7 @@ class _LobbyScreenState extends State<LobbyScreen> {
               ),
               onPressed: onAdd,
               icon: const Icon(Icons.person_add, size: 14),
-              label: const Text('Ekle', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
+              label: const Text('İstek Gönder', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
             )
           else
             ElevatedButton.icon(
@@ -1332,11 +1610,40 @@ class _LobbyScreenState extends State<LobbyScreen> {
                 const SizedBox(width: 8),
 
                 // Bildirim Zili
-                IconButton(
-                  tooltip: 'Bildirimler',
-                  visualDensity: VisualDensity.compact,
-                  onPressed: _showNotificationsSheet,
-                  icon: const Icon(Icons.notifications_active, color: Color(0xFFFDE047), size: 23),
+                Stack(
+                  clipBehavior: Clip.none,
+                  children: [
+                    IconButton(
+                      tooltip: 'Bildirimler',
+                      visualDensity: VisualDensity.compact,
+                      onPressed: () {
+                        _showNotificationsSheet();
+                      },
+                      icon: const Icon(Icons.notifications_active, color: Color(0xFFFDE047), size: 23),
+                    ),
+                    if (GameService.instance.unreadNotificationCount > 0)
+                      Positioned(
+                        top: 2,
+                        right: 2,
+                        child: Container(
+                          padding: const EdgeInsets.all(3.5),
+                          decoration: const BoxDecoration(
+                            color: Color(0xFFEF4444),
+                            shape: BoxShape.circle,
+                          ),
+                          constraints: const BoxConstraints(minWidth: 16, minHeight: 16),
+                          child: Text(
+                            '${GameService.instance.unreadNotificationCount}',
+                            textAlign: TextAlign.center,
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 9.5,
+                              fontWeight: FontWeight.w900,
+                            ),
+                          ),
+                        ),
+                      ),
+                  ],
                 ),
 
                 // Ayarlar Dişlisi
@@ -1412,7 +1719,7 @@ class _LobbyScreenState extends State<LobbyScreen> {
                 ),
                 const SizedBox(height: 12),
                 const Text(
-                  'YANIK İSKAMBİL HD',
+                  'YANIK İSKAMBİL VIP',
                   style: TextStyle(
                     color: Color(0xFFFDE047),
                     fontWeight: FontWeight.w900,

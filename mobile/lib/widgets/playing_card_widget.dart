@@ -148,11 +148,9 @@ class PlayingCardWidget extends StatelessWidget {
               ),
 
             // ORTA İSKAMBİL SANATI (A, J/Q/K, Sayı veya Joker)
-            // Sol üst köşe indeksiyle asla çakışmaması için alt-orta gövdeye hizalandı
+            // Tam matematiksel merkezde konumlandırıldı
             Align(
-              alignment: isPhysicalJoker
-                  ? Alignment.center
-                  : const Alignment(0.10, 0.26),
+              alignment: Alignment.center,
               child: _buildCenterCardArt(
                 isPhysicalJoker: isPhysicalJoker,
                 suitColor: suitColor,
@@ -160,28 +158,6 @@ class PlayingCardWidget extends StatelessWidget {
               ),
             ),
 
-            // YARDIMLI MODDA GÖSTERGE JOKERİ TAÇ İŞARETİ (Yardımsız modda asla görünmez!)
-            if (isIndicatorWild && showWildHints)
-              Positioned(
-                top: 3,
-                right: 3,
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 3.5, vertical: 1),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFFD97706),
-                    borderRadius: BorderRadius.circular(4),
-                  ),
-                  child: Text(
-                    '👑',
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontSize: (width * 0.125).clamp(6.5, 8.5),
-                      fontWeight: FontWeight.w900,
-                      height: 1.0,
-                    ),
-                  ),
-                ),
-              ),
 
             // YARDIMLI MODDA PER ONAY NOKTASI
             if (isMelded && !showAsWild)
@@ -277,16 +253,17 @@ class PlayingCardWidget extends StatelessWidget {
             fontSize: rankFontSize,
             fontWeight: FontWeight.w900,
             letterSpacing: card.rank == 10 ? -0.8 : -0.2,
-            height: 0.82,
+            height: 1.0,
           ),
         ),
+        SizedBox(height: (height * 0.015).clamp(1.0, 2.0)),
         Text(
           card.suitSymbol,
           style: TextStyle(
             color: suitColor,
             fontSize: cornerSuitSize,
             fontWeight: FontWeight.bold,
-            height: 0.80,
+            height: 1.0,
           ),
         ),
       ],
@@ -312,21 +289,17 @@ class PlayingCardWidget extends StatelessWidget {
       );
     }
 
-    // Kraliyet kağıtları (J, Q, K) için şık çerçeveli madalyon
+    // Kraliyet kağıtları (J, Q, K) için gerçekçi, şık casino madalyonu
     if (card.rank >= 11 && card.rank <= 13) {
-      final String crownIcon = card.rank == 13
-          ? '♔'
-          : card.rank == 12
-              ? '♕'
-              : '♘';
+      final String courtLetter = card.rankLabel; // "J", "Q", "K"
       return Container(
-        width: centerArtSize * 1.12,
-        height: centerArtSize * 1.28,
+        width: (centerArtSize * 0.95).clamp(16.0, 26.0),
+        height: (centerArtSize * 1.30).clamp(22.0, 36.0),
         decoration: BoxDecoration(
-          color: suitColor.withValues(alpha: 0.05),
-          borderRadius: BorderRadius.circular(6),
+          color: suitColor.withValues(alpha: 0.04),
+          borderRadius: BorderRadius.circular(5),
           border: Border.all(
-            color: const Color(0xFFD4AF37).withValues(alpha: 0.55),
+            color: const Color(0xFFD4AF37).withValues(alpha: 0.65),
             width: 1.0,
           ),
         ),
@@ -334,18 +307,29 @@ class PlayingCardWidget extends StatelessWidget {
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
             Text(
-              crownIcon,
+              card.suitSymbol,
               style: TextStyle(
-                color: const Color(0xFFB45309),
-                fontSize: centerArtSize * 0.52,
-                height: 0.95,
+                color: suitColor,
+                fontSize: (centerArtSize * 0.30).clamp(6.0, 10.0),
+                height: 1.0,
               ),
             ),
+            const SizedBox(height: 1),
+            Text(
+              courtLetter,
+              style: TextStyle(
+                color: suitColor,
+                fontSize: (centerArtSize * 0.52).clamp(10.0, 16.0),
+                fontWeight: FontWeight.w900,
+                height: 1.0,
+              ),
+            ),
+            const SizedBox(height: 1),
             Text(
               card.suitSymbol,
               style: TextStyle(
                 color: suitColor,
-                fontSize: centerArtSize * 0.56,
+                fontSize: (centerArtSize * 0.30).clamp(6.0, 10.0),
                 height: 1.0,
               ),
             ),
@@ -357,13 +341,13 @@ class PlayingCardWidget extends StatelessWidget {
     // As (A) için özel rozetli büyük sembol
     if (card.rank == 1) {
       return Container(
-        width: centerArtSize * 1.15,
-        height: centerArtSize * 1.15,
+        width: (centerArtSize * 1.10).clamp(18.0, 30.0),
+        height: (centerArtSize * 1.10).clamp(18.0, 30.0),
         decoration: BoxDecoration(
           shape: BoxShape.circle,
           color: suitColor.withValues(alpha: 0.06),
           border: Border.all(
-            color: suitColor.withValues(alpha: 0.18),
+            color: suitColor.withValues(alpha: 0.22),
             width: 1.0,
           ),
         ),
@@ -372,7 +356,7 @@ class PlayingCardWidget extends StatelessWidget {
             card.suitSymbol,
             style: TextStyle(
               color: suitColor,
-              fontSize: centerArtSize * 0.78,
+              fontSize: (centerArtSize * 0.72).clamp(13.0, 22.0),
               height: 1.0,
             ),
           ),
@@ -384,8 +368,8 @@ class PlayingCardWidget extends StatelessWidget {
     return Text(
       card.suitSymbol,
       style: TextStyle(
-        color: suitColor.withValues(alpha: 0.85),
-        fontSize: centerArtSize * 0.74,
+        color: suitColor.withValues(alpha: 0.88),
+        fontSize: (centerArtSize * 0.75).clamp(13.0, 22.0),
         height: 1.0,
       ),
     );

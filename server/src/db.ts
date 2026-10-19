@@ -121,6 +121,27 @@ class DatabaseService {
         UNIQUE(user_id, friend_id)
       );
 
+      CREATE TABLE IF NOT EXISTS friend_requests (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        sender_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        receiver_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        status VARCHAR(20) NOT NULL DEFAULT 'pending',
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        UNIQUE(sender_id, receiver_id)
+      );
+
+      CREATE TABLE IF NOT EXISTS user_notifications (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        type VARCHAR(50) NOT NULL,
+        title VARCHAR(100) NOT NULL,
+        message TEXT NOT NULL,
+        data JSONB DEFAULT '{}'::jsonb,
+        is_read BOOLEAN NOT NULL DEFAULT false,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+      );
+
       INSERT INTO system_vault (id, rake_collected, emoji_collected, total_games_played, emoji_cost)
       VALUES (1, 0, 0, 0, 10)
       ON CONFLICT (id) DO NOTHING;
@@ -677,38 +698,253 @@ class DatabaseService {
     }));
   }
 
+  async sendFriendRequest(
+    senderId: string,
+    receiverUsername: string
+  ): Promise<{
+    status: 'sent' | 'already_friends' | 'auto_accepted';
+    receiver: { id: string; username: string; avatar: string; role: string };
+    requestId?: string;
+  }> {
+    if (this.useMemory || !this.pool) {
+      throw new Error('Veritabanı bağlantısı yok.');
+    }
+    const receiverRes = await this.pool.query(
+      `SELECT id, username, avatar, role FROM users WHERE username ILIKE $1`,
+      [receiverUsername]
+    );
+    if (receiverRes.rows.length === 0) {
+      throw new Error(`'${receiverUsername}' adında bir kullanıcı bulunamadı.`);
+    }
+    const receiver = receiverRes.rows[0];
+    if (receiver.id === senderId) {
+      throw new Error('Kendinize arkadaşlık isteği gönderemezsiniz.');
+    }
+
+    // Zaten arkadaşlar mı?
+    const friendCheck = await this.pool.query(
+      `SELECT id FROM user_friends WHERE user_id = $1 AND friend_id = $2`,
+      [senderId, receiver.id]
+    );
+    if (friendCheck.rows.length > 0) {
+      throw new Error(`'${receiver.username}' ile zaten arkadaşsınız.`);
+    }
+
+    // Karşı taraf zaten bir istek göndermiş ve bekliyor mu? (Çapraz istek durumunda otomatik kabul)
+    const reverseReq = await this.pool.query(
+      `SELECT id FROM friend_requests WHERE sender_id = $1 AND receiver_id = $2 AND status = 'pending'`,
+      [receiver.id, senderId]
+    );
+    if (reverseReq.rows.length > 0) {
+      // Otomatik kabul et
+      await this.pool.query(
+        `UPDATE friend_requests SET status = 'accepted', updated_at = NOW() WHERE id = $1`,
+        [reverseReq.rows[0].id]
+      );
+      await this.pool.query(
+        `INSERT INTO user_friends (user_id, friend_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+        [senderId, receiver.id]
+      );
+      await this.pool.query(
+        `INSERT INTO user_friends (user_id, friend_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+        [receiver.id, senderId]
+      );
+      return {
+        status: 'auto_accepted',
+        receiver: {
+          id: String(receiver.id),
+          username: String(receiver.username),
+          avatar: String(receiver.avatar || 'king'),
+          role: String(receiver.role || 'player'),
+        },
+      };
+    }
+
+    // Daha önce gönderilmiş bekleyen istek var mı?
+    const existingReq = await this.pool.query(
+      `SELECT id, status FROM friend_requests WHERE sender_id = $1 AND receiver_id = $2 AND status = 'pending'`,
+      [senderId, receiver.id]
+    );
+    if (existingReq.rows.length > 0) {
+      throw new Error(`'${receiver.username}' kullanıcısına zaten bekleyen bir isteğiniz var.`);
+    }
+
+    // Yeni arkadaşlık isteği kaydet
+    const reqRes = await this.pool.query(
+      `INSERT INTO friend_requests (sender_id, receiver_id, status)
+       VALUES ($1, $2, 'pending')
+       ON CONFLICT (sender_id, receiver_id) DO UPDATE SET status = 'pending', updated_at = NOW()
+       RETURNING id`,
+      [senderId, receiver.id]
+    );
+
+    // Gönderenin adını alıp alıcıya bildirim oluştur
+    const senderRes = await this.pool.query(`SELECT username FROM users WHERE id = $1`, [senderId]);
+    const senderUsername = senderRes.rows[0]?.username || 'Bir oyuncu';
+
+    await this.pool.query(
+      `INSERT INTO user_notifications (user_id, type, title, message, data)
+       VALUES ($1, 'friend_request', 'Yeni Arkadaşlık İsteği', $2, $3)`,
+      [
+        receiver.id,
+        `${senderUsername} sana arkadaşlık isteği gönderdi.`,
+        JSON.stringify({
+          requestId: String(reqRes.rows[0].id),
+          senderId,
+          senderUsername,
+        }),
+      ]
+    );
+
+    return {
+      status: 'sent',
+      requestId: String(reqRes.rows[0].id),
+      receiver: {
+        id: String(receiver.id),
+        username: String(receiver.username),
+        avatar: String(receiver.avatar || 'king'),
+        role: String(receiver.role || 'player'),
+      },
+    };
+  }
+
+  async getPendingFriendRequests(userId: string): Promise<any[]> {
+    if (this.useMemory || !this.pool) return [];
+    const res = await this.pool.query(
+      `SELECT fr.id, fr.sender_id, fr.created_at, u.username, u.avatar, u.role
+       FROM friend_requests fr
+       JOIN users u ON fr.sender_id = u.id
+       WHERE fr.receiver_id = $1 AND fr.status = 'pending'
+       ORDER BY fr.created_at DESC`,
+      [userId]
+    );
+    return res.rows.map((r) => ({
+      id: String(r.id),
+      sender_id: String(r.sender_id),
+      username: String(r.username),
+      avatar: String(r.avatar || 'king'),
+      role: String(r.role || 'player'),
+      created_at: r.created_at,
+    }));
+  }
+
+  async getSentFriendRequestUserIds(userId: string): Promise<string[]> {
+    if (this.useMemory || !this.pool) return [];
+    const res = await this.pool.query(
+      `SELECT receiver_id FROM friend_requests WHERE sender_id = $1 AND status = 'pending'`,
+      [userId]
+    );
+    return res.rows.map((r) => String(r.receiver_id));
+  }
+
+  async respondFriendRequest(
+    requestId: string,
+    userId: string,
+    accept: boolean
+  ): Promise<{
+    success: boolean;
+    senderId?: string;
+    senderUsername?: string;
+  }> {
+    if (this.useMemory || !this.pool) {
+      throw new Error('Veritabanı bağlantısı yok.');
+    }
+    const reqRes = await this.pool.query(
+      `SELECT fr.id, fr.sender_id, fr.receiver_id, u.username as sender_username
+       FROM friend_requests fr
+       JOIN users u ON fr.sender_id = u.id
+       WHERE fr.id = $1 AND fr.receiver_id = $2 AND fr.status = 'pending'`,
+      [requestId, userId]
+    );
+    if (reqRes.rows.length === 0) {
+      throw new Error('İstek bulunamadı veya süresi dolmuş.');
+    }
+    const req = reqRes.rows[0];
+
+    if (accept) {
+      await this.pool.query(
+        `UPDATE friend_requests SET status = 'accepted', updated_at = NOW() WHERE id = $1`,
+        [requestId]
+      );
+      await this.pool.query(
+        `INSERT INTO user_friends (user_id, friend_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+        [userId, req.sender_id]
+      );
+      await this.pool.query(
+        `INSERT INTO user_friends (user_id, friend_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+        [req.sender_id, userId]
+      );
+
+      // Gönderene kabul bildirimini ekle
+      const receiverRes = await this.pool.query(`SELECT username FROM users WHERE id = $1`, [userId]);
+      const receiverUsername = receiverRes.rows[0]?.username || 'Oyuncu';
+
+      await this.pool.query(
+        `INSERT INTO user_notifications (user_id, type, title, message, data)
+         VALUES ($1, 'friend_accepted', 'Arkadaşlık Kabul Edildi', $2, $3)`,
+        [
+          req.sender_id,
+          `${receiverUsername} arkadaşlık isteğinizi kabul etti!`,
+          JSON.stringify({ friendId: userId, friendUsername: receiverUsername }),
+        ]
+      );
+
+      return {
+        success: true,
+        senderId: String(req.sender_id),
+        senderUsername: String(req.sender_username),
+      };
+    } else {
+      await this.pool.query(
+        `UPDATE friend_requests SET status = 'rejected', updated_at = NOW() WHERE id = $1`,
+        [requestId]
+      );
+      return { success: true };
+    }
+  }
+
+  async getNotifications(userId: string): Promise<any[]> {
+    if (this.useMemory || !this.pool) return [];
+    const res = await this.pool.query(
+      `SELECT id, type, title, message, data, is_read, created_at
+       FROM user_notifications
+       WHERE user_id = $1
+       ORDER BY created_at DESC
+       LIMIT 30`,
+      [userId]
+    );
+    return res.rows.map((r) => ({
+      id: String(r.id),
+      type: String(r.type),
+      title: String(r.title),
+      message: String(r.message),
+      data: r.data || {},
+      is_read: Boolean(r.is_read),
+      created_at: r.created_at,
+    }));
+  }
+
+  async markNotificationRead(notificationId: string, userId: string): Promise<void> {
+    if (this.useMemory || !this.pool) return;
+    await this.pool.query(
+      `UPDATE user_notifications SET is_read = true WHERE id = $1 AND user_id = $2`,
+      [notificationId, userId]
+    );
+  }
+
+  async markAllNotificationsRead(userId: string): Promise<void> {
+    if (this.useMemory || !this.pool) return;
+    await this.pool.query(
+      `UPDATE user_notifications SET is_read = true WHERE user_id = $1`,
+      [userId]
+    );
+  }
+
   async addFriend(
     userId: string,
     friendUsername: string
   ): Promise<{ id: string; username: string; avatar: string; role: string }> {
-    if (this.useMemory || !this.pool) {
-      throw new Error('Veritabanı bağlantısı yok.');
-    }
-    const friendRes = await this.pool.query(
-      `SELECT id, username, avatar, role FROM users WHERE username ILIKE $1`,
-      [friendUsername]
-    );
-    if (friendRes.rows.length === 0) {
-      throw new Error(`'${friendUsername}' adında bir kullanıcı bulunamadı.`);
-    }
-    const friend = friendRes.rows[0];
-    if (friend.id === userId) {
-      throw new Error('Kendinizi arkadaş olarak ekleyemezsiniz.');
-    }
-    await this.pool.query(
-      `INSERT INTO user_friends (user_id, friend_id) VALUES ($1, $2) ON CONFLICT (user_id, friend_id) DO NOTHING`,
-      [userId, friend.id]
-    );
-    await this.pool.query(
-      `INSERT INTO user_friends (user_id, friend_id) VALUES ($1, $2) ON CONFLICT (user_id, friend_id) DO NOTHING`,
-      [friend.id, userId]
-    );
-    return {
-      id: String(friend.id),
-      username: String(friend.username),
-      avatar: String(friend.avatar || 'king'),
-      role: String(friend.role || 'player'),
-    };
+    return (await this.sendFriendRequest(userId, friendUsername)).receiver;
   }
 
   async getUsersByIds(

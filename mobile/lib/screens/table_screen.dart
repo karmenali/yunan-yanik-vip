@@ -1039,6 +1039,44 @@ class _TableScreenState extends State<TableScreen> {
               ),
               const SizedBox(width: 4),
 
+              // OYUN SESİ AÇ / KAPA (MUTE) BUTONU
+              InkWell(
+                onTap: () {
+                  final enabled = SoundFx.toggleSound();
+                  setState(() {});
+                  gs.toastStreamController.add(
+                    enabled ? '🔊 Oyun sesleri açıldı' : '🔇 Oyun sesleri kapatıldı',
+                  );
+                },
+                borderRadius: BorderRadius.circular(18),
+                child: Container(
+                  width: 32,
+                  height: 32,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: SoundFx.soundEnabled
+                        ? const Color(0xFF064E3B)
+                        : Colors.black54,
+                    border: Border.all(
+                      color: SoundFx.soundEnabled
+                          ? const Color(0xFF34D399)
+                          : Colors.white38,
+                      width: 1.2,
+                    ),
+                  ),
+                  child: Icon(
+                    SoundFx.soundEnabled
+                        ? Icons.volume_up_rounded
+                        : Icons.volume_off_rounded,
+                    color: SoundFx.soundEnabled
+                        ? const Color(0xFFFDE047)
+                        : Colors.white54,
+                    size: 15,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 4),
+
               InkWell(
                 onTap: () => setState(() => _showChatDrawer = !_showChatDrawer),
                 borderRadius: BorderRadius.circular(18),
@@ -1850,8 +1888,6 @@ class _TableScreenState extends State<TableScreen> {
           Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const Text('👑', style: TextStyle(fontSize: 15, height: 1.0)),
-              const SizedBox(height: 2),
               if (indicator != null)
                 PlayingCardWidget(
                   card: indicator,

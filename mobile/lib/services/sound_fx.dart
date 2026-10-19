@@ -46,68 +46,46 @@ class SoundFx {
     soundEnabled = enabled;
   }
 
+  static bool toggleSound() {
+    soundEnabled = !soundEnabled;
+    return soundEnabled;
+  }
+
   static void playCardDraw() {
     playCardSlide();
   }
 
   static void playCardSlide() {
     if (!soundEnabled) return;
-    HapticFeedback.lightImpact();
-    _playTone(
-      key: 'slide',
-      freqStart: 540,
-      freqEnd: 880,
-      durationMs: 65,
-      volume: 0.30,
-    );
+    HapticFeedback.selectionClick();
+    _playAcousticSfx('card_slide', _generateCardSlideWav);
   }
 
   static void playCardDiscard() {
     if (!soundEnabled) return;
     HapticFeedback.mediumImpact();
-    _playTone(
-      key: 'discard',
-      freqStart: 420,
-      freqEnd: 240,
-      durationMs: 75,
-      volume: 0.35,
-    );
+    _playAcousticSfx('card_discard', _generateCardDiscardWav);
   }
 
   static void playCardTap() {
     if (!soundEnabled) return;
-    HapticFeedback.selectionClick();
-    _playTone(
-      key: 'tap',
-      freqStart: 680,
-      freqEnd: 740,
-      durationMs: 35,
-      volume: 0.22,
-    );
+    HapticFeedback.lightImpact();
+    _playAcousticSfx('card_tap', _generateCardTapWav);
   }
 
   static void playCountdownBeep({bool urgent = false}) {
     if (!soundEnabled) return;
     HapticFeedback.lightImpact();
-    _playTone(
-      key: urgent ? 'beep_urgent' : 'beep_normal',
-      freqStart: urgent ? 1040 : 780,
-      freqEnd: urgent ? 1040 : 780,
-      durationMs: urgent ? 110 : 80,
-      volume: urgent ? 0.48 : 0.32,
+    _playAcousticSfx(
+      urgent ? 'tick_urgent' : 'tick_normal',
+      () => _generateTickWav(urgent: urgent),
     );
   }
 
   static void playCelebration() {
     if (!soundEnabled) return;
     HapticFeedback.heavyImpact();
-    _playTone(
-      key: 'win',
-      freqStart: 523,
-      freqEnd: 1046,
-      durationMs: 220,
-      volume: 0.45,
-    );
+    _playAcousticSfx('celebration', _generateCelebrationWav);
   }
 
   // ===========================================================================
@@ -371,78 +349,150 @@ class SoundFx {
     return out;
   }
 
-  static Future<void> _playTone({
-    required String key,
-    required double freqStart,
-    required double freqEnd,
-    required int durationMs,
-    required double volume,
-  }) async {
+  static Future<void> _playAcousticSfx(
+    String key,
+    Uint8List Function() generator,
+  ) async {
     try {
-      final bytes = _wavCache.putIfAbsent(
-        key,
-        () => _generateSmoothWav(
-          freqStart: freqStart,
-          freqEnd: freqEnd,
-          durationMs: durationMs,
-          volume: volume,
-        ),
-      );
+      final bytes = _wavCache.putIfAbsent(key, generator);
       await _sfxPlayer.stop();
       await _sfxPlayer.play(BytesSource(bytes, mimeType: 'audio/wav'));
     } catch (_) {}
   }
 
-  static Uint8List _generateSmoothWav({
-    required double freqStart,
-    required double freqEnd,
-    required int durationMs,
-    required double volume,
-  }) {
-    const int sampleRate = 22050;
-    final int numSamples = ((sampleRate * durationMs) / 1000).round();
+  static ByteData _createWavHeader(int numSamples, int sampleRate) {
     final int dataSize = numSamples * 2;
     final ByteData buffer = ByteData(44 + dataSize);
 
-    buffer.setUint8(0, 0x52);
-    buffer.setUint8(1, 0x49);
-    buffer.setUint8(2, 0x46);
-    buffer.setUint8(3, 0x46);
+    buffer.setUint8(0, 0x52); // R
+    buffer.setUint8(1, 0x49); // I
+    buffer.setUint8(2, 0x46); // F
+    buffer.setUint8(3, 0x46); // F
     buffer.setUint32(4, 36 + dataSize, Endian.little);
-    buffer.setUint8(8, 0x57);
-    buffer.setUint8(9, 0x41);
-    buffer.setUint8(10, 0x56);
-    buffer.setUint8(11, 0x45);
+    buffer.setUint8(8, 0x57);  // W
+    buffer.setUint8(9, 0x41);  // A
+    buffer.setUint8(10, 0x56); // V
+    buffer.setUint8(11, 0x45); // E
 
-    buffer.setUint8(12, 0x66);
-    buffer.setUint8(13, 0x6D);
-    buffer.setUint8(14, 0x74);
-    buffer.setUint8(15, 0x20);
+    buffer.setUint8(12, 0x66); // f
+    buffer.setUint8(13, 0x6D); // m
+    buffer.setUint8(14, 0x74); // t
+    buffer.setUint8(15, 0x20); // ' '
     buffer.setUint32(16, 16, Endian.little);
-    buffer.setUint16(20, 1, Endian.little);
-    buffer.setUint16(22, 1, Endian.little);
+    buffer.setUint16(20, 1, Endian.little); // PCM
+    buffer.setUint16(22, 1, Endian.little); // Mono
     buffer.setUint32(24, sampleRate, Endian.little);
     buffer.setUint32(28, sampleRate * 2, Endian.little);
     buffer.setUint16(32, 2, Endian.little);
     buffer.setUint16(34, 16, Endian.little);
 
-    buffer.setUint8(36, 0x64);
-    buffer.setUint8(37, 0x61);
-    buffer.setUint8(38, 0x74);
-    buffer.setUint8(39, 0x61);
+    buffer.setUint8(36, 0x64); // d
+    buffer.setUint8(37, 0x61); // a
+    buffer.setUint8(38, 0x74); // t
+    buffer.setUint8(39, 0x61); // a
     buffer.setUint32(40, dataSize, Endian.little);
+    return buffer;
+  }
 
-    double phase = 0;
+  /// Masada iskambil kağıdının çuha üzerinde kayma (whoosh/hışırtı) sesi
+  static Uint8List _generateCardSlideWav() {
+    const int sampleRate = 22050;
+    const int durationMs = 70;
+    final int numSamples = ((sampleRate * durationMs) / 1000).round();
+    final ByteData buffer = _createWavHeader(numSamples, sampleRate);
+    final rng = math.Random(42);
+    double filter = 0;
     for (int i = 0; i < numSamples; i++) {
       final double progress = i / numSamples;
-      final double freq = freqStart + (freqEnd - freqStart) * progress;
-      final double envelope = math.sin(progress * math.pi);
-      phase += (2 * math.pi * freq) / sampleRate;
-      final double sample = math.sin(phase) * envelope * volume;
+      final double env = math.sin(progress * math.pi) * (1.0 - progress * 0.35);
+      final double white = rng.nextDouble() * 2.0 - 1.0;
+      filter = (filter * 0.72) + (white * 0.28);
+      final double sample = filter * env * 0.38;
       final int pcm16 = (sample * 32767).round().clamp(-32768, 32767);
       buffer.setInt16(44 + i * 2, pcm16, Endian.little);
     }
+    return buffer.buffer.asUint8List();
+  }
 
+  /// Masaya sert/tok iskambil kağıdı atma ve çuhaya vurma sesi
+  static Uint8List _generateCardDiscardWav() {
+    const int sampleRate = 22050;
+    const int durationMs = 55;
+    final int numSamples = ((sampleRate * durationMs) / 1000).round();
+    final ByteData buffer = _createWavHeader(numSamples, sampleRate);
+    final rng = math.Random(1337);
+    double filter = 0;
+    for (int i = 0; i < numSamples; i++) {
+      final double progress = i / numSamples;
+      final double env = math.exp(-progress * 10.0);
+      final double noise = rng.nextDouble() * 2.0 - 1.0;
+      filter = (filter * 0.55) + (noise * 0.45);
+      final double thump = math.sin(2 * math.pi * 150 * (i / sampleRate));
+      final double sample = (filter * 0.60 + thump * 0.40) * env * 0.50;
+      final int pcm16 = (sample * 32767).round().clamp(-32768, 32767);
+      buffer.setInt16(44 + i * 2, pcm16, Endian.little);
+    }
+    return buffer.buffer.asUint8List();
+  }
+
+  /// Kart seçme / dokunma ince tık sesi
+  static Uint8List _generateCardTapWav() {
+    const int sampleRate = 22050;
+    const int durationMs = 20;
+    final int numSamples = ((sampleRate * durationMs) / 1000).round();
+    final ByteData buffer = _createWavHeader(numSamples, sampleRate);
+    final rng = math.Random(99);
+    for (int i = 0; i < numSamples; i++) {
+      final double progress = i / numSamples;
+      final double env = math.exp(-progress * 20.0);
+      final double sample = (rng.nextDouble() * 2.0 - 1.0) * env * 0.25;
+      final int pcm16 = (sample * 32767).round().clamp(-32768, 32767);
+      buffer.setInt16(44 + i * 2, pcm16, Endian.little);
+    }
+    return buffer.buffer.asUint8List();
+  }
+
+  /// Tur sayacı için ahşap/soft metronom tik tak sesi
+  static Uint8List _generateTickWav({required bool urgent}) {
+    const int sampleRate = 22050;
+    final int durationMs = urgent ? 35 : 25;
+    final int numSamples = ((sampleRate * durationMs) / 1000).round();
+    final ByteData buffer = _createWavHeader(numSamples, sampleRate);
+    final double freq = urgent ? 880 : 580;
+    for (int i = 0; i < numSamples; i++) {
+      final double progress = i / numSamples;
+      final double env = math.exp(-progress * 14.0);
+      final double tone = math.sin(2 * math.pi * freq * (i / sampleRate));
+      final double sample = tone * env * (urgent ? 0.40 : 0.26);
+      final int pcm16 = (sample * 32767).round().clamp(-32768, 32767);
+      buffer.setInt16(44 + i * 2, pcm16, Endian.little);
+    }
+    return buffer.buffer.asUint8List();
+  }
+
+  /// El açma / oyun kazanma zarif zil akoru
+  static Uint8List _generateCelebrationWav() {
+    const int sampleRate = 22050;
+    const int durationMs = 380;
+    final int numSamples = ((sampleRate * durationMs) / 1000).round();
+    final ByteData buffer = _createWavHeader(numSamples, sampleRate);
+    final freqs = [523.25, 659.25, 783.99, 1046.50]; // C - E - G - C
+    for (int i = 0; i < numSamples; i++) {
+      final double t = i / sampleRate;
+      final double progress = i / numSamples;
+      double sample = 0;
+      for (int n = 0; n < freqs.length; n++) {
+        final double noteStart = n * 0.07;
+        if (t >= noteStart) {
+          final double noteT = t - noteStart;
+          final double noteEnv = math.exp(-noteT * 6.5);
+          sample += math.sin(2 * math.pi * freqs[n] * noteT) * noteEnv * 0.22;
+        }
+      }
+      final double masterEnv = (1.0 - progress).clamp(0.0, 1.0);
+      final int pcm16 = ((sample * masterEnv).clamp(-1.0, 1.0) * 32767).round();
+      buffer.setInt16(44 + i * 2, pcm16, Endian.little);
+    }
     return buffer.buffer.asUint8List();
   }
 }

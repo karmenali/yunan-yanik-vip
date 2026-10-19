@@ -33,7 +33,7 @@ class YanikIskambilHdApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Yanık İskambil HD',
+      title: 'Yanık İskambil VIP',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         brightness: Brightness.dark,

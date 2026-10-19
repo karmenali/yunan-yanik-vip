@@ -46,6 +46,11 @@ class GameService extends ChangeNotifier {
       StreamController<Map<String, dynamic>>.broadcast();
   final StreamController<String> toastStreamController =
       StreamController<String>.broadcast();
+  final StreamController<Map<String, dynamic>> notificationStreamController =
+      StreamController<Map<String, dynamic>>.broadcast();
+
+  int unreadNotificationCount = 0;
+  List<String> sentFriendRequestUserIds = [];
 
   String get serverUrl => _serverUrl;
   bool get isLoggedIn => _token != null && currentUser != null;
@@ -450,6 +455,27 @@ class GameService extends ChangeNotifier {
       notifyListeners();
     });
 
+    _socket!.on('notification_received', (data) {
+      if (data is Map) {
+        unreadNotificationCount++;
+        final map = Map<String, dynamic>.from(data);
+        notificationStreamController.add(map);
+        toastStreamController.add(map['message']?.toString() ?? 'Yeni bir bildirim aldınız!');
+        notifyListeners();
+      }
+    });
+
+    _socket!.on('friend_request_received', (data) {
+      if (data is Map) {
+        unreadNotificationCount++;
+        notifyListeners();
+      }
+    });
+
+    _socket!.on('friend_added', (data) {
+      notifyListeners();
+    });
+
     _socket!.on('error_msg', (msg) {
       if (msg != null) {
         toastStreamController.add(msg.toString());
@@ -559,6 +585,9 @@ class GameService extends ChangeNotifier {
       });
       if (res.statusCode == 200) {
         final data = jsonDecode(res.body);
+        if (data['sentRequestUserIds'] is List) {
+          sentFriendRequestUserIds = List<String>.from(data['sentRequestUserIds']);
+        }
         return List<Map<String, dynamic>>.from(data['friends'] ?? []);
       }
     } catch (e) {
@@ -567,9 +596,9 @@ class GameService extends ChangeNotifier {
     return [];
   }
 
-  Future<bool> addFriend(String username) async {
+  Future<Map<String, dynamic>> sendFriendRequest(String username) async {
     try {
-      final uri = Uri.parse('$_serverUrl/api/friends/add');
+      final uri = Uri.parse('$_serverUrl/api/friends/request');
       final res = await http.post(
         uri,
         headers: {
@@ -578,15 +607,106 @@ class GameService extends ChangeNotifier {
         },
         body: jsonEncode({'username': username}),
       );
-      if (res.statusCode == 200) {
-        return true;
+      final data = jsonDecode(res.body);
+      if (res.statusCode == 200 && data['success'] == true) {
+        if (data['receiver']?['id'] != null) {
+          final rid = data['receiver']['id'].toString();
+          if (!sentFriendRequestUserIds.contains(rid)) {
+            sentFriendRequestUserIds.add(rid);
+          }
+        }
+        notifyListeners();
+        return Map<String, dynamic>.from(data);
       } else {
-        final data = jsonDecode(res.body);
-        throw Exception(data['error'] ?? 'Arkadaş eklenemedi.');
+        throw Exception(data['error'] ?? 'Arkadaşlık isteği gönderilemedi.');
       }
     } catch (e) {
       rethrow;
     }
+  }
+
+  Future<List<Map<String, dynamic>>> getPendingFriendRequests() async {
+    try {
+      final uri = Uri.parse('$_serverUrl/api/friends/requests');
+      final res = await http.get(uri, headers: {
+        'Authorization': 'Bearer $_token',
+      });
+      if (res.statusCode == 200) {
+        final data = jsonDecode(res.body);
+        return List<Map<String, dynamic>>.from(data['requests'] ?? []);
+      }
+    } catch (e) {
+      debugPrint('getPendingFriendRequests error: $e');
+    }
+    return [];
+  }
+
+  Future<bool> respondFriendRequest(String requestId, bool accept) async {
+    try {
+      final uri = Uri.parse('$_serverUrl/api/friends/respond');
+      final res = await http.post(
+        uri,
+        headers: {
+          'Authorization': 'Bearer $_token',
+          'Content-Type': 'application/json',
+        },
+        body: jsonEncode({'requestId': requestId, 'accept': accept}),
+      );
+      if (res.statusCode == 200) {
+        if (unreadNotificationCount > 0) unreadNotificationCount--;
+        notifyListeners();
+        return true;
+      }
+    } catch (e) {
+      debugPrint('respondFriendRequest error: $e');
+    }
+    return false;
+  }
+
+  Future<List<Map<String, dynamic>>> getNotifications() async {
+    try {
+      final uri = Uri.parse('$_serverUrl/api/notifications');
+      final res = await http.get(uri, headers: {
+        'Authorization': 'Bearer $_token',
+      });
+      if (res.statusCode == 200) {
+        final data = jsonDecode(res.body);
+        final list = List<Map<String, dynamic>>.from(data['notifications'] ?? []);
+        unreadNotificationCount = list.where((n) => n['is_read'] != true).length;
+        notifyListeners();
+        return list;
+      }
+    } catch (e) {
+      debugPrint('getNotifications error: $e');
+    }
+    return [];
+  }
+
+  Future<void> markNotificationsRead([String? id]) async {
+    try {
+      final uri = Uri.parse('$_serverUrl/api/notifications/read');
+      await http.post(
+        uri,
+        headers: {
+          'Authorization': 'Bearer $_token',
+          'Content-Type': 'application/json',
+        },
+        body: jsonEncode(id != null ? {'id': id} : {}),
+      );
+      if (id == null) {
+        unreadNotificationCount = 0;
+      } else if (unreadNotificationCount > 0) {
+        unreadNotificationCount--;
+      }
+      notifyListeners();
+    } catch (e) {
+      debugPrint('markNotificationsRead error: $e');
+    }
+  }
+
+  Future<bool> addFriend(String username) async {
+    final res = await sendFriendRequest(username);
+    return res['success'] == true;
   }
 
   Future<List<Map<String, dynamic>>> getOnlineUsers() async {

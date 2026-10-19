@@ -1,7 +1,7 @@
 {
   "name": "yanik-iskambil-server",
   "version": "1.0.0",
-  "description": "Yanık İskambil HD Multiplayer Real-Time Game Server (Node.js + Socket.IO + PostgreSQL)",
+  "description": "Yanık İskambil VIP Multiplayer Real-Time Game Server (Node.js + Socket.IO + PostgreSQL)",
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",

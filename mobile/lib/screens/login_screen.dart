@@ -140,7 +140,7 @@ class _LoginScreenState extends State<LoginScreen> {
                     ),
                     const SizedBox(height: 16),
                     const Text(
-                      'YANIK İSKAMBİL HD',
+                      'YANIK İSKAMBİL VIP',
                       style: TextStyle(
                         color: Color(0xFFFDE047),
                         fontSize: 27,

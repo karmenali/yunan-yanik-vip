@@ -236,32 +236,146 @@ app.get('/api/users/search', requireAuth, async (req, res) => {
 // Arkadaş Listesi
 app.get('/api/friends', requireAuth, async (req, res) => {
   try {
-    const friends = await db.getFriends((req as any).user.userId);
+    const userId = (req as any).user.userId;
+    const [friends, sentUserIds] = await Promise.all([
+      db.getFriends(userId),
+      db.getSentFriendRequestUserIds(userId),
+    ]);
     const withOnline = friends.map((f) => ({
       ...f,
       is_online: tableManager.isUserOnline(f.id),
     }));
-    res.json({ friends: withOnline });
+    res.json({ friends: withOnline, sentRequestUserIds: sentUserIds });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// Arkadaş Ekleme
-app.post('/api/friends/add', requireAuth, async (req, res) => {
+// Arkadaşlık İstekleri Listesi (Gelen bekleyen istekler)
+app.get('/api/friends/requests', requireAuth, async (req, res) => {
   try {
+    const userId = (req as any).user.userId;
+    const requests = await db.getPendingFriendRequests(userId);
+    res.json({ requests });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Arkadaşlık İsteği Gönderme
+app.post('/api/friends/request', requireAuth, async (req, res) => {
+  try {
+    const userId = (req as any).user.userId;
     const username = String(req.body.username || '').trim();
     if (!username) {
       return res.status(400).json({ error: 'Kullanıcı adı belirtilmelidir.' });
     }
-    const friend = await db.addFriend((req as any).user.userId, username);
-    res.json({
-      success: true,
-      friend: {
-        ...friend,
-        is_online: tableManager.isUserOnline(friend.id),
+    const result = await db.sendFriendRequest(userId, username);
+
+    // Alıcı online ise gerçek zamanlı soket bildirimi gönder
+    io.to(`user:${result.receiver.id}`).emit('notification_received', {
+      type: 'friend_request',
+      title: 'Yeni Arkadaşlık İsteği',
+      message: `${(req as any).user.username || 'Bir oyuncu'} sana arkadaşlık isteği gönderdi.`,
+      requestId: result.requestId,
+    });
+    io.to(`user:${result.receiver.id}`).emit('friend_request_received', {
+      requestId: result.requestId,
+      sender: {
+        id: userId,
+        username: (req as any).user.username,
       },
     });
+
+    if (result.status === 'auto_accepted') {
+      io.to(`user:${userId}`).emit('friend_added', { friend: result.receiver });
+      io.to(`user:${result.receiver.id}`).emit('friend_added', {
+        friend: { id: userId, username: (req as any).user.username },
+      });
+    }
+
+    res.json({
+      success: true,
+      status: result.status,
+      receiver: result.receiver,
+      message:
+        result.status === 'auto_accepted'
+          ? `'${result.receiver.username}' ile karşılıklı arkadaş oldunuz!`
+          : `'${result.receiver.username}' kullanıcısına arkadaşlık isteği gönderildi.`,
+    });
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// Arkadaşlık İsteğine Yanıt Verme (Kabul / Red)
+app.post('/api/friends/respond', requireAuth, async (req, res) => {
+  try {
+    const userId = (req as any).user.userId;
+    const { requestId, accept } = req.body;
+    if (!requestId) {
+      return res.status(400).json({ error: 'İstek ID belirtilmelidir.' });
+    }
+    const result = await db.respondFriendRequest(requestId, userId, Boolean(accept));
+
+    if (accept && result.senderId) {
+      // Her iki tarafa arkadaş eklendi olayını bildir
+      io.to(`user:${userId}`).emit('friend_added', {
+        friend: { id: result.senderId, username: result.senderUsername },
+      });
+      io.to(`user:${result.senderId}`).emit('friend_added', {
+        friend: { id: userId, username: (req as any).user.username },
+      });
+      io.to(`user:${result.senderId}`).emit('notification_received', {
+        type: 'friend_accepted',
+        title: 'Arkadaşlık Kabul Edildi',
+        message: `${(req as any).user.username || 'Oyuncu'} arkadaşlık isteğinizi kabul etti!`,
+      });
+    }
+
+    res.json({ success: true, accepted: Boolean(accept) });
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// Bildirim Listesi
+app.get('/api/notifications', requireAuth, async (req, res) => {
+  try {
+    const userId = (req as any).user.userId;
+    const notifications = await db.getNotifications(userId);
+    res.json({ notifications });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Bildirimi Okundu Olarak İşaretle
+app.post('/api/notifications/read', requireAuth, async (req, res) => {
+  try {
+    const userId = (req as any).user.userId;
+    const { id } = req.body;
+    if (id) {
+      await db.markNotificationRead(id, userId);
+    } else {
+      await db.markAllNotificationsRead(userId);
+    }
+    res.json({ success: true });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Eski addFriend route geriye dönük uyumluluk için (doğrudan istek gönderir)
+app.post('/api/friends/add', requireAuth, async (req, res) => {
+  try {
+    const userId = (req as any).user.userId;
+    const username = String(req.body.username || '').trim();
+    if (!username) {
+      return res.status(400).json({ error: 'Kullanıcı adı belirtilmelidir.' });
+    }
+    const result = await db.sendFriendRequest(userId, username);
+    res.json({ success: true, ...result });
   } catch (err: any) {
     res.status(400).json({ error: err.message });
   }
