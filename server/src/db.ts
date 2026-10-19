@@ -112,6 +112,15 @@ class DatabaseService {
         updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
       );
 
+      CREATE TABLE IF NOT EXISTS user_friends (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        friend_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        status VARCHAR(20) DEFAULT 'accepted',
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        UNIQUE(user_id, friend_id)
+      );
+
       INSERT INTO system_vault (id, rake_collected, emoji_collected, total_games_played, emoji_cost)
       VALUES (1, 0, 0, 0, 10)
       ON CONFLICT (id) DO NOTHING;
@@ -614,6 +623,115 @@ class DatabaseService {
     } finally {
       client.release();
     }
+  }
+
+  async searchUsers(
+    query: string,
+    currentUserId: string
+  ): Promise<{ id: string; username: string; avatar: string; role: string }[]> {
+    if (this.useMemory || !this.pool) {
+      const q = query.toLowerCase();
+      const results: { id: string; username: string; avatar: string; role: string }[] = [];
+      for (const u of this.memUsers.values()) {
+        if (u.id !== currentUserId && u.username.toLowerCase().includes(q)) {
+          results.push({ id: u.id, username: u.username, avatar: u.avatar, role: u.role });
+        }
+      }
+      return results;
+    }
+    const res = await this.pool.query(
+      `SELECT id, username, avatar, role FROM users WHERE username ILIKE $1 AND id != $2 ORDER BY username ASC LIMIT 20`,
+      [`%${query}%`, currentUserId]
+    );
+    return res.rows.map((r) => ({
+      id: String(r.id),
+      username: String(r.username),
+      avatar: String(r.avatar || 'king'),
+      role: String(r.role || 'player'),
+    }));
+  }
+
+  async getFriends(
+    userId: string
+  ): Promise<{ id: string; username: string; avatar: string; role: string }[]> {
+    if (this.useMemory || !this.pool) {
+      return [];
+    }
+    const res = await this.pool.query(
+      `SELECT u.id, u.username, u.avatar, u.role
+       FROM user_friends f
+       JOIN users u ON f.friend_id = u.id
+       WHERE f.user_id = $1
+       ORDER BY u.username ASC`,
+      [userId]
+    );
+    return res.rows.map((r) => ({
+      id: String(r.id),
+      username: String(r.username),
+      avatar: String(r.avatar || 'king'),
+      role: String(r.role || 'player'),
+    }));
+  }
+
+  async addFriend(
+    userId: string,
+    friendUsername: string
+  ): Promise<{ id: string; username: string; avatar: string; role: string }> {
+    if (this.useMemory || !this.pool) {
+      throw new Error('Veritabanı bağlantısı yok.');
+    }
+    const friendRes = await this.pool.query(
+      `SELECT id, username, avatar, role FROM users WHERE username ILIKE $1`,
+      [friendUsername]
+    );
+    if (friendRes.rows.length === 0) {
+      throw new Error(`'${friendUsername}' adında bir kullanıcı bulunamadı.`);
+    }
+    const friend = friendRes.rows[0];
+    if (friend.id === userId) {
+      throw new Error('Kendinizi arkadaş olarak ekleyemezsiniz.');
+    }
+    await this.pool.query(
+      `INSERT INTO user_friends (user_id, friend_id) VALUES ($1, $2) ON CONFLICT (user_id, friend_id) DO NOTHING`,
+      [userId, friend.id]
+    );
+    await this.pool.query(
+      `INSERT INTO user_friends (user_id, friend_id) VALUES ($1, $2) ON CONFLICT (user_id, friend_id) DO NOTHING`,
+      [friend.id, userId]
+    );
+    return {
+      id: String(friend.id),
+      username: String(friend.username),
+      avatar: String(friend.avatar || 'king'),
+      role: String(friend.role || 'player'),
+    };
+  }
+
+  async getUsersByIds(
+    ids: string[]
+  ): Promise<{ id: string; username: string; avatar: string; role: string }[]> {
+    if (ids.length === 0) return [];
+    if (this.useMemory || !this.pool) {
+      return ids
+        .map((id) => this.memUsers.get(id))
+        .filter(Boolean)
+        .map((u) => ({
+          id: u!.id,
+          username: u!.username,
+          avatar: u!.avatar,
+          role: u!.role,
+        }));
+    }
+    const res = await this.pool.query(
+      `SELECT id, username, avatar, role FROM users WHERE id = ANY($1::uuid[])`,
+      [ids]
+    );
+    return res.rows.map((r) => ({
+      id: String(r.id),
+      username: String(r.username),
+      avatar: String(r.avatar || 'king'),
+      role: String(r.role || 'player'),
+    }));
   }
 
   private mapUserRow(row: any): UserRecord {

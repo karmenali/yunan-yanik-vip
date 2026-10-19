@@ -214,6 +214,71 @@ app.get('/api/profile/history', requireAuth, async (req, res) => {
 });
 
 // ==========================================
+// 👥 GERÇEK ARKADAŞLAR VE ÇEVRİMİÇİ KULLANICILAR API
+// ==========================================
+
+// Kullanıcı Arama
+app.get('/api/users/search', requireAuth, async (req, res) => {
+  try {
+    const q = String(req.query.q || '').trim();
+    if (!q) return res.json({ users: [] });
+    const users = await db.searchUsers(q, (req as any).user.userId);
+    const withOnline = users.map((u) => ({
+      ...u,
+      is_online: tableManager.isUserOnline(u.id),
+    }));
+    res.json({ users: withOnline });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Arkadaş Listesi
+app.get('/api/friends', requireAuth, async (req, res) => {
+  try {
+    const friends = await db.getFriends((req as any).user.userId);
+    const withOnline = friends.map((f) => ({
+      ...f,
+      is_online: tableManager.isUserOnline(f.id),
+    }));
+    res.json({ friends: withOnline });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Arkadaş Ekleme
+app.post('/api/friends/add', requireAuth, async (req, res) => {
+  try {
+    const username = String(req.body.username || '').trim();
+    if (!username) {
+      return res.status(400).json({ error: 'Kullanıcı adı belirtilmelidir.' });
+    }
+    const friend = await db.addFriend((req as any).user.userId, username);
+    res.json({
+      success: true,
+      friend: {
+        ...friend,
+        is_online: tableManager.isUserOnline(friend.id),
+      },
+    });
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// Çevrimiçi Kullanıcılar
+app.get('/api/users/online', requireAuth, async (req, res) => {
+  try {
+    const onlineIds = tableManager.getOnlineUserIds((req as any).user.userId);
+    const users = await db.getUsersByIds(onlineIds);
+    res.json({ users: users.map((u) => ({ ...u, is_online: true })) });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ==========================================
 // 👑 UYGULAMA İÇİ ADMİN PANELİ ENDPOINTLERİ
 // ==========================================
 
@@ -372,6 +437,29 @@ io.on('connection', (socket) => {
     socket.emit('lobby_tables', tableManager.getLobbyTablesSummary());
   });
 
+  // Hızlı Oyun: Tek tıkla 4 kişilik masada 3 bot ile anında oyuna başlama
+  socket.on('create_quick_match', async (_data, cb) => {
+    try {
+      const dbUser = await db.getUserById(user.userId);
+      if (!dbUser) throw new Error('Kullanıcı bulunamadı.');
+      const entryFee = 100;
+      if (dbUser.credits < entryFee) {
+        throw new Error(`Oyuna başlamak için en az ${entryFee} krediniz olmalıdır.`);
+      }
+      const table = tableManager.createQuickMatchWithBots(
+        dbUser.id,
+        dbUser.username,
+        dbUser.avatar,
+        entryFee
+      );
+      tableManager.joinTableRoom(socket, dbUser.id, table.id);
+      if (cb) cb({ ok: true, tableId: table.id });
+    } catch (err: any) {
+      if (cb) cb({ ok: false, error: err.message });
+      else socket.emit('error_msg', err.message);
+    }
+  });
+
   // Yeni Oyun Odası Açma (Min 2, Maks 6 Kişilik + Giriş Kredisi + Yardımlı/Yardımsız Mod + Oynama Bekleme Süresi)
   socket.on('create_table', async (data, cb) => {
     try {
@@ -449,6 +537,20 @@ io.on('connection', (socket) => {
   socket.on('leave_table', (data) => {
     if (data?.tableId) {
       tableManager.leaveTableRoom(socket, user.userId, String(data.tableId));
+    }
+  });
+
+  // Masayı Tamamen Terk Et (Oyundan Çekil / Masadan Çık)
+  socket.on('forfeit_match', async (data, cb) => {
+    try {
+      if (data?.tableId) {
+        socket.leave(`table:${data.tableId}`);
+        await tableManager.forfeitAndLeaveTable(user.userId, String(data.tableId));
+      }
+      if (cb) cb({ ok: true });
+    } catch (err: any) {
+      if (cb) cb({ ok: false, error: err.message });
+      else socket.emit('error_msg', err.message);
     }
   });
 

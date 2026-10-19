@@ -66,9 +66,9 @@ class PlayingCardWidget extends StatelessWidget {
     }
 
     final double radius = (width * 0.13).clamp(6.0, 11.0);
-    final double rankFontSize = (width * 0.27).clamp(11.0, 20.0);
-    final double cornerSuitSize = (width * 0.21).clamp(9.0, 15.0);
-    final double centerArtSize = (width * 0.44).clamp(16.0, 34.0);
+    final double rankFontSize = (width * 0.25).clamp(10.0, 18.0);
+    final double cornerSuitSize = (width * 0.17).clamp(7.5, 12.5);
+    final double centerArtSize = (width * 0.38).clamp(14.0, 26.0);
 
     final Widget cardBody = Container(
       width: width,
@@ -121,8 +121,8 @@ class PlayingCardWidget extends StatelessWidget {
 
             // SOL ÜST KÖŞE İNDEKSİ (Sayı + Sembol)
             Positioned(
-              top: (height * 0.045).clamp(2.5, 5.0),
-              left: (width * 0.075).clamp(3.5, 6.0),
+              top: (height * 0.040).clamp(2.0, 4.5),
+              left: (width * 0.070).clamp(3.0, 5.5),
               child: _buildCornerIndex(
                 isPhysicalJoker: isPhysicalJoker,
                 suitColor: suitColor,
@@ -134,8 +134,8 @@ class PlayingCardWidget extends StatelessWidget {
             // SAĞ ALT KÖŞE TERS İNDEKS (Gerçek İskambil Kağıdı Simetrisi)
             if (height >= 64)
               Positioned(
-                bottom: (height * 0.045).clamp(2.5, 5.0),
-                right: (width * 0.075).clamp(3.5, 6.0),
+                bottom: (height * 0.040).clamp(2.0, 4.5),
+                right: (width * 0.070).clamp(3.0, 5.5),
                 child: Transform.rotate(
                   angle: math.pi,
                   child: _buildCornerIndex(
@@ -148,7 +148,11 @@ class PlayingCardWidget extends StatelessWidget {
               ),
 
             // ORTA İSKAMBİL SANATI (A, J/Q/K, Sayı veya Joker)
-            Center(
+            // Sol üst köşe indeksiyle asla çakışmaması için alt-orta gövdeye hizalandı
+            Align(
+              alignment: isPhysicalJoker
+                  ? Alignment.center
+                  : const Alignment(0.06, 0.20),
               child: _buildCenterCardArt(
                 isPhysicalJoker: isPhysicalJoker,
                 suitColor: suitColor,
@@ -272,17 +276,18 @@ class PlayingCardWidget extends StatelessWidget {
             color: suitColor,
             fontSize: rankFontSize,
             fontWeight: FontWeight.w900,
-            letterSpacing: card.rank == 10 ? -1.1 : -0.3,
-            height: 0.95,
+            letterSpacing: card.rank == 10 ? -1.0 : -0.2,
+            height: 0.90,
           ),
         ),
+        const SizedBox(height: 1),
         Text(
           card.suitSymbol,
           style: TextStyle(
             color: suitColor,
             fontSize: cornerSuitSize,
             fontWeight: FontWeight.bold,
-            height: 0.95,
+            height: 0.85,
           ),
         ),
       ],

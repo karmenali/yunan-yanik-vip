@@ -278,7 +278,7 @@ class _TableScreenState extends State<TableScreen> {
         table.seats.any((s) => s?.userId == myId && !s!.isEliminated);
 
     if (isSeatedInActiveMatch) {
-      final shouldLeave = await showDialog<bool>(
+      final action = await showDialog<String>(
         context: context,
         builder: (ctx) => AlertDialog(
           backgroundColor: const Color(0xFF0E2F21),
@@ -295,29 +295,47 @@ class _TableScreenState extends State<TableScreen> {
             ),
           ),
           content: const Text(
-            'Oyun şu anda devam ediyor. Lobiye dönerseniz koltuğunuz korunur ve istediğiniz an "Aktif Masana Dön" butonuyla geri gelebilirsiniz.\n\nLobiye dönmek istiyor musunuz?',
-            style: TextStyle(color: Colors.white70, fontSize: 13),
+            'Oyun şu anda devam ediyor. Ne yapmak istiyorsunuz?\n\n'
+            '• Masayı Terk Et: Koltuğunuzu tamamen bırakırsınız ve lobide hemen yeni bir oda açabilirsiniz.\n\n'
+            '• Lobiye Dön: Koltuğunuz korunur, istediğiniz zaman "Aktif Masana Dön" butonuyla geri gelebilirsiniz.',
+            style: TextStyle(color: Colors.white70, fontSize: 12.5, height: 1.35),
           ),
           actions: [
             TextButton(
-              onPressed: () => Navigator.pop(ctx, false),
-              child: const Text('Masada Kal', style: TextStyle(color: Colors.white70)),
+              onPressed: () => Navigator.pop(ctx, 'cancel'),
+              child: const Text('Vazgeç', style: TextStyle(color: Colors.white60)),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, 'minimize'),
+              child: const Text('Lobiye Dön (Koru)',
+                  style: TextStyle(color: Color(0xFF67E8F9), fontWeight: FontWeight.bold)),
             ),
             ElevatedButton(
               style: ElevatedButton.styleFrom(
-                backgroundColor: const Color(0xFFD4AF37),
-                foregroundColor: Colors.black,
+                backgroundColor: Colors.red.shade800,
+                foregroundColor: Colors.white,
               ),
-              onPressed: () => Navigator.pop(ctx, true),
+              onPressed: () => Navigator.pop(ctx, 'forfeit'),
               child: const Text(
-                'Lobiye Dön',
+                'Masayı Terk Et',
                 style: TextStyle(fontWeight: FontWeight.bold),
               ),
             ),
           ],
         ),
       );
-      if (shouldLeave != true) return;
+      if (action == null || action == 'cancel') return;
+
+      await gs.stopContinuousMic();
+      if (action == 'forfeit') {
+        gs.forfeitMatch();
+      } else {
+        gs.leaveCurrentTable();
+      }
+      if (mounted) {
+        Navigator.of(context).pop();
+      }
+      return;
     }
 
     await gs.stopContinuousMic();
@@ -1768,14 +1786,18 @@ class _TableScreenState extends State<TableScreen> {
                 ),
               ],
               InkWell(
-                onTap: () => gs.standUp(),
+                onTap: () {
+                  gs.standUp();
+                  gs.leaveCurrentTable();
+                  if (mounted) Navigator.of(context).pop();
+                },
                 child: const Padding(
-                  padding: EdgeInsets.only(top: 4),
+                  padding: EdgeInsets.only(top: 6),
                   child: Text(
-                    'Koltuktan Kalk',
+                    'Masadan Kalk & Lobiye Dön',
                     style: TextStyle(
                       color: Colors.white54,
-                      fontSize: 10,
+                      fontSize: 10.5,
                       decoration: TextDecoration.underline,
                     ),
                   ),

@@ -225,10 +225,19 @@ class _LobbyScreenState extends State<LobbyScreen> {
   // ===========================================================================
   // 👥 ARKADAŞLAR & OYUNA DAVET MODALI
   // ===========================================================================
+  // ===========================================================================
+  // 👥 GERÇEK ARKADAŞLAR & OYUNCU ARAMA MODALI
+  // ===========================================================================
   Future<void> _showFriendsSheet() async {
-    final friendAddCtrl = TextEditingController();
+    final searchCtrl = TextEditingController();
+    List<Map<String, dynamic>> friends = [];
+    List<Map<String, dynamic>> onlineUsers = [];
+    List<Map<String, dynamic>> searchResults = [];
+    bool isLoading = true;
+    bool isSearching = false;
+    String? statusMessage;
 
-    showModalBottomSheet(
+    await showModalBottomSheet(
       context: context,
       backgroundColor: const Color(0xFF0A2419),
       isScrollControlled: true,
@@ -236,112 +245,239 @@ class _LobbyScreenState extends State<LobbyScreen> {
         borderRadius: BorderRadius.vertical(top: Radius.circular(22)),
       ),
       builder: (ctx) {
-        return Padding(
-          padding: EdgeInsets.only(
-            bottom: MediaQuery.of(ctx).viewInsets.bottom,
-            top: 18,
-            left: 18,
-            right: 18,
-          ),
-          child: SizedBox(
-            height: MediaQuery.sizeOf(ctx).height * 0.65,
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    const Text(
-                      '👥 Arkadaşlar & Davet',
-                      style: TextStyle(
-                        color: Color(0xFFFDE047),
-                        fontWeight: FontWeight.w900,
-                        fontSize: 17,
-                      ),
-                    ),
-                    IconButton(
-                      onPressed: () => Navigator.pop(ctx),
-                      icon: const Icon(Icons.close, color: Colors.white70),
-                    ),
-                  ],
-                ),
-                const Divider(color: Colors.white24),
-                const SizedBox(height: 8),
+        return StatefulBuilder(
+          builder: (ctx, setSheetState) {
+            void loadData() async {
+              try {
+                final [fList, oList] = await Future.wait([
+                  GameService.instance.getFriends(),
+                  GameService.instance.getOnlineUsers(),
+                ]);
+                if (ctx.mounted) {
+                  setSheetState(() {
+                    friends = fList;
+                    onlineUsers = oList;
+                    isLoading = false;
+                  });
+                }
+              } catch (_) {
+                if (ctx.mounted) {
+                  setSheetState(() => isLoading = false);
+                }
+              }
+            }
 
-                // Arkadaş Ekleme Inputu
-                Row(
+            if (isLoading) {
+              loadData();
+            }
+
+            return Padding(
+              padding: EdgeInsets.only(
+                bottom: MediaQuery.of(ctx).viewInsets.bottom,
+                top: 18,
+                left: 18,
+                right: 18,
+              ),
+              child: SizedBox(
+                height: MediaQuery.sizeOf(ctx).height * 0.70,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Expanded(
-                      child: TextField(
-                        controller: friendAddCtrl,
-                        style: const TextStyle(color: Colors.white),
-                        decoration: InputDecoration(
-                          hintText: 'Kullanıcı adı ile arkadaş ekle...',
-                          hintStyle: const TextStyle(color: Colors.white54, fontSize: 13),
-                          prefixIcon: const Icon(Icons.person_add, color: Color(0xFFD4AF37), size: 18),
-                          filled: true,
-                          fillColor: Colors.black38,
-                          contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                          border: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(12),
-                            borderSide: const BorderSide(color: Color(0xFFD4AF37)),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        const Row(
+                          children: [
+                            Icon(Icons.people_alt_rounded, color: Color(0xFFFDE047), size: 22),
+                            SizedBox(width: 8),
+                            Text(
+                              'Arkadaşlar & Oyuncular',
+                              style: TextStyle(
+                                color: Color(0xFFFDE047),
+                                fontWeight: FontWeight.w900,
+                                fontSize: 17,
+                              ),
+                            ),
+                          ],
+                        ),
+                        IconButton(
+                          onPressed: () => Navigator.pop(ctx),
+                          icon: const Icon(Icons.close, color: Colors.white70),
+                        ),
+                      ],
+                    ),
+                    const Divider(color: Colors.white24),
+                    const SizedBox(height: 8),
+
+                    // Gerçek Kullanıcı Arama ve Arkadaş Ekleme Inputu
+                    Row(
+                      children: [
+                        Expanded(
+                          child: TextField(
+                            controller: searchCtrl,
+                            style: const TextStyle(color: Colors.white, fontSize: 13),
+                            onChanged: (text) async {
+                              final query = text.trim();
+                              if (query.isEmpty) {
+                                setSheetState(() {
+                                  isSearching = false;
+                                  searchResults = [];
+                                });
+                                return;
+                              }
+                              setSheetState(() => isSearching = true);
+                              final res = await GameService.instance.searchUsers(query);
+                              if (ctx.mounted) {
+                                setSheetState(() => searchResults = res);
+                              }
+                            },
+                            decoration: InputDecoration(
+                              hintText: 'Kullanıcı adı ile ara veya ekle...',
+                              hintStyle: const TextStyle(color: Colors.white54, fontSize: 12.5),
+                              prefixIcon: const Icon(Icons.search, color: Color(0xFFD4AF37), size: 18),
+                              filled: true,
+                              fillColor: Colors.black38,
+                              contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                              border: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(12),
+                                borderSide: const BorderSide(color: Color(0xFFD4AF37)),
+                              ),
+                            ),
                           ),
                         ),
-                      ),
+                        const SizedBox(width: 8),
+                        ElevatedButton(
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: const Color(0xFFD4AF37),
+                            foregroundColor: Colors.black,
+                            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                          ),
+                          onPressed: () async {
+                            final name = searchCtrl.text.trim();
+                            if (name.isEmpty) return;
+                            try {
+                              await GameService.instance.addFriend(name);
+                              searchCtrl.clear();
+                              setSheetState(() {
+                                isSearching = false;
+                                searchResults = [];
+                                statusMessage = '✅ $name arkadaş listenize eklendi!';
+                              });
+                              loadData();
+                            } catch (e) {
+                              setSheetState(() {
+                                statusMessage = '❌ $e';
+                              });
+                            }
+                          },
+                          child: const Text('Ekle', style: TextStyle(fontWeight: FontWeight.bold)),
+                        ),
+                      ],
                     ),
-                    const SizedBox(width: 8),
-                    ElevatedButton(
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: const Color(0xFFD4AF37),
-                        foregroundColor: Colors.black,
-                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                    if (statusMessage != null) ...[
+                      const SizedBox(height: 6),
+                      Text(
+                        statusMessage!,
+                        style: TextStyle(
+                          color: statusMessage!.startsWith('✅') ? const Color(0xFF34D399) : Colors.redAccent,
+                          fontSize: 11.5,
+                          fontWeight: FontWeight.w600,
+                        ),
                       ),
-                      onPressed: () {
-                        if (friendAddCtrl.text.trim().isNotEmpty) {
-                          final name = friendAddCtrl.text.trim();
-                          friendAddCtrl.clear();
-                          Navigator.pop(ctx);
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            SnackBar(
-                              content: Text('$name kullanıcısına arkadaşlık isteği gönderildi! 📲'),
-                              backgroundColor: const Color(0xFF059669),
-                            ),
-                          );
-                        }
-                      },
-                      child: const Text('Ekle', style: TextStyle(fontWeight: FontWeight.bold)),
+                    ],
+                    const SizedBox(height: 12),
+
+                    // Gösterim Başlığı
+                    Text(
+                      isSearching
+                          ? 'Arama Sonuçları (${searchResults.length}):'
+                          : friends.isNotEmpty
+                              ? 'Arkadaşlarınız (${friends.length}):'
+                              : 'Çevrimiçi Oyuncular (${onlineUsers.length}):',
+                      style: const TextStyle(color: Colors.white70, fontWeight: FontWeight.bold, fontSize: 12),
+                    ),
+                    const SizedBox(height: 8),
+
+                    // İçerik Listesi
+                    Expanded(
+                      child: isLoading
+                          ? const Center(child: CircularProgressIndicator(color: Color(0xFFD4AF37)))
+                          : isSearching
+                              ? searchResults.isEmpty
+                                  ? const Center(
+                                      child: Text(
+                                        'Kullanıcı bulunamadı.',
+                                        style: TextStyle(color: Colors.white54, fontSize: 13),
+                                      ),
+                                    )
+                                  : ListView.builder(
+                                      itemCount: searchResults.length,
+                                      itemBuilder: (_, i) => _buildRealUserTile(
+                                        searchResults[i],
+                                        onAdd: () async {
+                                          try {
+                                            await GameService.instance.addFriend(searchResults[i]['username']);
+                                            loadData();
+                                            setSheetState(() {
+                                              statusMessage = '✅ ${searchResults[i]['username']} eklendi!';
+                                            });
+                                          } catch (e) {
+                                            setSheetState(() => statusMessage = '❌ $e');
+                                          }
+                                        },
+                                      ),
+                                    )
+                              : friends.isNotEmpty
+                                  ? ListView.builder(
+                                      itemCount: friends.length,
+                                      itemBuilder: (_, i) => _buildRealUserTile(friends[i]),
+                                    )
+                                  : onlineUsers.isNotEmpty
+                                      ? ListView.builder(
+                                          itemCount: onlineUsers.length,
+                                          itemBuilder: (_, i) => _buildRealUserTile(
+                                            onlineUsers[i],
+                                            onAdd: () async {
+                                              try {
+                                                await GameService.instance.addFriend(onlineUsers[i]['username']);
+                                                loadData();
+                                                setSheetState(() {
+                                                  statusMessage = '✅ ${onlineUsers[i]['username']} eklendi!';
+                                                });
+                                              } catch (e) {
+                                                setSheetState(() => statusMessage = '❌ $e');
+                                              }
+                                            },
+                                          ),
+                                        )
+                                      : const Center(
+                                          child: Padding(
+                                            padding: EdgeInsets.all(16),
+                                            child: Text(
+                                              'Henüz ekli arkadaşınız bulunmuyor.\nYukarıdaki kutudan kullanıcı adı yazarak ekleyebilirsiniz.',
+                                              textAlign: TextAlign.center,
+                                              style: TextStyle(color: Colors.white54, fontSize: 13),
+                                            ),
+                                          ),
+                                        ),
                     ),
                   ],
                 ),
-                const SizedBox(height: 14),
-
-                const Text(
-                  'Çevrimiçi Oyuncular & Arkadaşlar:',
-                  style: TextStyle(color: Colors.white70, fontWeight: FontWeight.bold, fontSize: 12.5),
-                ),
-                const SizedBox(height: 8),
-
-                Expanded(
-                  child: ListView(
-                    children: [
-                      _buildFriendTile('Ahmet_Usta', 'lion', true),
-                      _buildFriendTile('Merve_Kralice', 'queen', true),
-                      _buildFriendTile('Emre_99', 'wolf', false),
-                      _buildFriendTile('Mehmet_VIP', 'king', true),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-          ),
+              ),
+            );
+          },
         );
       },
     );
   }
 
-  Widget _buildFriendTile(String username, String avatarKey, bool isOnline) {
+  Widget _buildRealUserTile(Map<String, dynamic> user, {VoidCallback? onAdd}) {
+    final username = user['username']?.toString() ?? 'Oyuncu';
+    final avatarKey = user['avatar']?.toString() ?? 'lion';
     final avatar = VipAvatar.fromKey(avatarKey);
+    final isOnline = user['is_online'] == true;
+
     return Container(
       margin: const EdgeInsets.only(bottom: 8),
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
@@ -389,27 +525,40 @@ class _LobbyScreenState extends State<LobbyScreen> {
               ],
             ),
           ),
-          ElevatedButton.icon(
-            style: ElevatedButton.styleFrom(
-              backgroundColor: isOnline ? const Color(0xFF10B981) : Colors.white12,
-              foregroundColor: Colors.white,
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+          if (onAdd != null)
+            ElevatedButton.icon(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFFD4AF37),
+                foregroundColor: Colors.black,
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+              ),
+              onPressed: onAdd,
+              icon: const Icon(Icons.person_add, size: 14),
+              label: const Text('Ekle', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
+            )
+          else
+            ElevatedButton.icon(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: isOnline ? const Color(0xFF10B981) : Colors.white12,
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+              ),
+              onPressed: isOnline
+                  ? () {
+                      Navigator.pop(context);
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(
+                          content: Text('$username kullanıcısına oyun daveti gönderildi! 📲'),
+                          backgroundColor: const Color(0xFF059669),
+                        ),
+                      );
+                    }
+                  : null,
+              icon: const Icon(Icons.send_rounded, size: 14),
+              label: const Text('Davet', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
             ),
-            onPressed: isOnline
-                ? () {
-                    Navigator.pop(context);
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(
-                        content: Text('$username telefonuna oyun davet bildirimi gönderildi! 📲'),
-                        backgroundColor: const Color(0xFF059669),
-                      ),
-                    );
-                  }
-                : null,
-            icon: const Icon(Icons.send_rounded, size: 14),
-            label: const Text('Davet Et', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
-          ),
         ],
       ),
     );
@@ -680,7 +829,6 @@ class _LobbyScreenState extends State<LobbyScreen> {
     int maxPlayers = 4;
     bool isAssisted = true;
     int turnDuration = 30; // 15, 30, 45 sn
-    bool addBotForTest = false;
 
     await showModalBottomSheet(
       context: context,
@@ -910,22 +1058,9 @@ class _LobbyScreenState extends State<LobbyScreen> {
                 ),
                 const SizedBox(height: 12),
 
-                // 6. BOT OYUNCU İLE BAŞLAT SEÇENEĞİ (Tek Kişiyle Test Edebilmek İçin)
-                SwitchListTile(
-                  contentPadding: EdgeInsets.zero,
-                  activeThumbColor: const Color(0xFFD4AF37),
-                  title: const Row(
-                    children: [
-                      Text('🤖 Test İçin Bot Oyuncu ile Başlat', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 13)),
-                    ],
-                  ),
-                  subtitle: const Text('Oda açıldığında hemen 1 bot oturur ve anında test edebilirsiniz.', style: TextStyle(color: Colors.white54, fontSize: 11)),
-                  value: addBotForTest,
-                  onChanged: (val) => setDialogState(() => addBotForTest = val),
-                ),
                 const SizedBox(height: 16),
 
-                // 7. ODA AÇ BUTONU (BÜYÜK YEŞİL KART TASARIMI)
+                // 6. ODA AÇ BUTONU (BÜYÜK YEŞİL KART TASARIMI)
                 SizedBox(
                   width: double.infinity,
                   height: 50,
@@ -946,9 +1081,6 @@ class _LobbyScreenState extends State<LobbyScreen> {
                           isAssisted: isAssisted,
                           turnDurationSeconds: turnDuration,
                         );
-                        if (addBotForTest) {
-                          GameService.instance.addBot(tableId);
-                        }
                         if (!ctx.mounted) return;
                         Navigator.pop(ctx);
                         _openTable(tableId, autoSit: true);
@@ -1048,17 +1180,43 @@ class _LobbyScreenState extends State<LobbyScreen> {
     );
   }
 
-  void _handleQuickPlay() {
-    final tables = GameService.instance.lobbyTables;
-    // Açık ve boş koltuğu olan ilk odayı bul
-    for (final t in tables) {
-      if ((t.status == 'waiting' || t.status == 'finished') && t.seatedCount < t.maxPlayers) {
-        _openTable(t.id, autoSit: true);
-        return;
+  Future<void> _handleQuickPlay() async {
+    final user = GameService.instance.currentUser;
+    if (user != null && user.credits < 100) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Oyuna başlamak için en az 100 krediniz olmalıdır.'),
+          backgroundColor: Colors.red,
+        ),
+      );
+      return;
+    }
+
+    try {
+      showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (_) => const Center(
+          child: CircularProgressIndicator(color: Color(0xFFD4AF37)),
+        ),
+      );
+
+      final tableId = await GameService.instance.createQuickMatchWithBots();
+      if (!mounted) return;
+      Navigator.of(context, rootNavigator: true).pop();
+
+      _openTable(tableId, autoSit: true);
+    } catch (e) {
+      if (mounted) {
+        Navigator.of(context, rootNavigator: true).pop();
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Hızlı oyun başlatılamadı: $e'),
+            backgroundColor: Colors.red.shade800,
+          ),
+        );
       }
     }
-    // Yoksa hemen hızlı oda aç
-    _showCreateTableDialog();
   }
 
   @override
@@ -1269,12 +1427,12 @@ class _LobbyScreenState extends State<LobbyScreen> {
 
           const SizedBox(height: 36),
 
-          // 3 ANA BUTON (OYNA, OYUN ODASI AÇ, ODALARA KATIL)
+          // 2 ANA BUTON (OYNA, ODALARA KATIL)
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 24),
             child: Column(
               children: [
-                // 1. OYNA BUTONU (Yeşil Gradient)
+                // 1. OYNA BUTONU (Yeşil Gradient - 3 Bot ile Anında Başla)
                 _buildBigMenuButton(
                   title: 'OYNA',
                   icon: Icons.play_arrow_rounded,
@@ -1282,19 +1440,9 @@ class _LobbyScreenState extends State<LobbyScreen> {
                   borderColor: const Color(0xFF34D399),
                   onTap: _handleQuickPlay,
                 ),
-                const SizedBox(height: 14),
+                const SizedBox(height: 16),
 
-                // 2. OYUN ODASI AÇ BUTONU
-                _buildBigMenuButton(
-                  title: 'OYUN ODASI AÇ',
-                  icon: Icons.table_restaurant_rounded,
-                  gradient: const [Color(0xFF1E293B), Color(0xFF0F172A)],
-                  borderColor: const Color(0xFFD4AF37),
-                  onTap: _showCreateTableDialog,
-                ),
-                const SizedBox(height: 14),
-
-                // 3. ODALARA KATIL BUTONU
+                // 2. ODALARA KATIL BUTONU
                 _buildBigMenuButton(
                   title: 'ODALARA KATIL',
                   icon: Icons.groups_rounded,

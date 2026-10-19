@@ -518,6 +518,93 @@ class GameService extends ChangeNotifier {
     return completer.future;
   }
 
+  /// Tek tıkla 4 kişilik masada 3 bot ile anında oyuna başlama
+  Future<String> createQuickMatchWithBots() {
+    final completer = Completer<String>();
+    _socket?.emitWithAck(
+      'create_quick_match',
+      {},
+      ack: (res) {
+        if (res is Map && res['ok'] == true) {
+          completer.complete(res['tableId'].toString());
+        } else {
+          completer.completeError(res?['error'] ?? 'Hızlı oyun başlatılamadı.');
+        }
+      },
+    );
+    return completer.future;
+  }
+
+  Future<List<Map<String, dynamic>>> searchUsers(String query) async {
+    try {
+      final uri = Uri.parse('$_serverUrl/api/users/search?q=${Uri.encodeComponent(query)}');
+      final res = await http.get(uri, headers: {
+        'Authorization': 'Bearer $_token',
+      });
+      if (res.statusCode == 200) {
+        final data = jsonDecode(res.body);
+        return List<Map<String, dynamic>>.from(data['users'] ?? []);
+      }
+    } catch (e) {
+      debugPrint('searchUsers error: $e');
+    }
+    return [];
+  }
+
+  Future<List<Map<String, dynamic>>> getFriends() async {
+    try {
+      final uri = Uri.parse('$_serverUrl/api/friends');
+      final res = await http.get(uri, headers: {
+        'Authorization': 'Bearer $_token',
+      });
+      if (res.statusCode == 200) {
+        final data = jsonDecode(res.body);
+        return List<Map<String, dynamic>>.from(data['friends'] ?? []);
+      }
+    } catch (e) {
+      debugPrint('getFriends error: $e');
+    }
+    return [];
+  }
+
+  Future<bool> addFriend(String username) async {
+    try {
+      final uri = Uri.parse('$_serverUrl/api/friends/add');
+      final res = await http.post(
+        uri,
+        headers: {
+          'Authorization': 'Bearer $_token',
+          'Content-Type': 'application/json',
+        },
+        body: jsonEncode({'username': username}),
+      );
+      if (res.statusCode == 200) {
+        return true;
+      } else {
+        final data = jsonDecode(res.body);
+        throw Exception(data['error'] ?? 'Arkadaş eklenemedi.');
+      }
+    } catch (e) {
+      rethrow;
+    }
+  }
+
+  Future<List<Map<String, dynamic>>> getOnlineUsers() async {
+    try {
+      final uri = Uri.parse('$_serverUrl/api/users/online');
+      final res = await http.get(uri, headers: {
+        'Authorization': 'Bearer $_token',
+      });
+      if (res.statusCode == 200) {
+        final data = jsonDecode(res.body);
+        return List<Map<String, dynamic>>.from(data['users'] ?? []);
+      }
+    } catch (e) {
+      debugPrint('getOnlineUsers error: $e');
+    }
+    return [];
+  }
+
   void addBot(String tableId) {
     _socket?.emit('add_bot', {'tableId': tableId});
   }
@@ -547,6 +634,17 @@ class GameService extends ChangeNotifier {
     stopContinuousMic();
     if (activeTable != null) {
       _socket?.emit('leave_table', {'tableId': activeTable!.id});
+      activeTable = null;
+      lastDrawnCardId = null;
+      tableChatMessages.clear();
+      notifyListeners();
+    }
+  }
+
+  void forfeitMatch() {
+    stopContinuousMic();
+    if (activeTable != null) {
+      _socket?.emit('forfeit_match', {'tableId': activeTable!.id});
       activeTable = null;
       lastDrawnCardId = null;
       tableChatMessages.clear();
