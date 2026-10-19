@@ -540,6 +540,10 @@ class DatabaseService {
       for (const [uid, amt] of Object.entries(contributions)) {
         const cleanAmt = Math.round(Number(amt));
         if (cleanAmt <= 0) continue;
+        // Botları ve geçersiz UUID formatındaki kullanıcıları atla
+        if (uid.startsWith('bot_') || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(uid)) {
+          continue;
+        }
         const uRes = await client.query(
           'SELECT id, username, credits FROM users WHERE id = $1 FOR UPDATE',
           [uid]
