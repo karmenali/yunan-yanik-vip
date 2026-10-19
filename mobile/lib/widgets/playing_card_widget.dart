@@ -66,9 +66,9 @@ class PlayingCardWidget extends StatelessWidget {
     }
 
     final double radius = (width * 0.13).clamp(6.0, 11.0);
-    final double rankFontSize = (width * 0.25).clamp(10.0, 18.0);
-    final double cornerSuitSize = (width * 0.17).clamp(7.5, 12.5);
-    final double centerArtSize = (width * 0.38).clamp(14.0, 26.0);
+    final double rankFontSize = (width * 0.22).clamp(9.0, 15.0);
+    final double cornerSuitSize = (width * 0.14).clamp(6.5, 10.5);
+    final double centerArtSize = (width * 0.34).clamp(13.0, 22.0);
 
     final Widget cardBody = Container(
       width: width,
@@ -152,7 +152,7 @@ class PlayingCardWidget extends StatelessWidget {
             Align(
               alignment: isPhysicalJoker
                   ? Alignment.center
-                  : const Alignment(0.06, 0.20),
+                  : const Alignment(0.10, 0.26),
               child: _buildCenterCardArt(
                 isPhysicalJoker: isPhysicalJoker,
                 suitColor: suitColor,
@@ -276,18 +276,17 @@ class PlayingCardWidget extends StatelessWidget {
             color: suitColor,
             fontSize: rankFontSize,
             fontWeight: FontWeight.w900,
-            letterSpacing: card.rank == 10 ? -1.0 : -0.2,
-            height: 0.90,
+            letterSpacing: card.rank == 10 ? -0.8 : -0.2,
+            height: 0.82,
           ),
         ),
-        const SizedBox(height: 1),
         Text(
           card.suitSymbol,
           style: TextStyle(
             color: suitColor,
             fontSize: cornerSuitSize,
             fontWeight: FontWeight.bold,
-            height: 0.85,
+            height: 0.80,
           ),
         ),
       ],
@@ -386,7 +385,7 @@ class PlayingCardWidget extends StatelessWidget {
       card.suitSymbol,
       style: TextStyle(
         color: suitColor.withValues(alpha: 0.85),
-        fontSize: centerArtSize * 0.86,
+        fontSize: centerArtSize * 0.74,
         height: 1.0,
       ),
     );

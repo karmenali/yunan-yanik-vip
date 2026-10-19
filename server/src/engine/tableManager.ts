@@ -168,6 +168,19 @@ export class TableManager {
           turnDurationSeconds: table.turnDurationSeconds,
           matchElapsedSeconds,
         });
+
+        // Watchdog failsafe: Süre dolup üzerinden 1.5 sn geçtiği halde hamle yapılmadıysa zorla oynat
+        if (
+          table.status === 'playing' &&
+          table.turnDeadline > 0 &&
+          now > table.turnDeadline + 1500
+        ) {
+          try {
+            this.handleTurnTimeout(table);
+          } catch (err) {
+            console.error('Watchdog turn timeout hatası:', err);
+          }
+        }
       }
     }
   }
@@ -423,7 +436,7 @@ export class TableManager {
     entryFee: number = 100
   ): GameTable {
     const table = this.createTable(
-      `${username} Masası`,
+      `${username} Odası`,
       userId,
       username,
       4,
@@ -908,7 +921,7 @@ export class TableManager {
           p.userId,
           -table.entryFee,
           'table_entry',
-          `${table.name} odası oyun giriş ücreti (1x)`
+          `${table.name} giriş ücreti (1x)`
         );
         chargedUsers.push(p.userId);
         collectedPot += table.entryFee;
@@ -1039,7 +1052,8 @@ export class TableManager {
   private getNextActiveSeatIndex(table: GameTable, fromSeat: number): number {
     const max = table.seats.length;
     for (let offset = 1; offset <= max; offset++) {
-      const idx = (fromSeat + offset) % max;
+      // Soldan sağa oyun akışı (saat yönünün tersi)
+      const idx = (fromSeat - offset + max * 2) % max;
       const s = table.seats[idx];
       if (s && !s.isEliminated) {
         return idx;
@@ -1413,8 +1427,8 @@ export class TableManager {
       activePlayers.find((p) => p.userId === leadUserId)?.seatIndex ?? table.currentTurnSeat;
 
     const orderedPlayers = [...activePlayers].sort((a, b) => {
-      const distA = (a.seatIndex - leadSeat + table.maxPlayers) % table.maxPlayers;
-      const distB = (b.seatIndex - leadSeat + table.maxPlayers) % table.maxPlayers;
+      const distA = (leadSeat - a.seatIndex + table.maxPlayers * 2) % table.maxPlayers;
+      const distB = (leadSeat - b.seatIndex + table.maxPlayers * 2) % table.maxPlayers;
       return distA - distB;
     });
 
@@ -1626,7 +1640,7 @@ export class TableManager {
             userId,
             -cost,
             'table_rebuy',
-            `${table.name} masası ${multiplier}x yeniden oyuna giriş (Re-buy)`
+            `${table.name} ${multiplier}x yeniden oyuna giriş (Re-buy)`
           );
           this.emitBalanceUpdate(userId, newBalance);
         } catch (err) {

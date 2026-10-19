@@ -965,25 +965,31 @@ class _LobbyScreenState extends State<LobbyScreen> {
                 const Text('Oyuncu Sayısı', style: TextStyle(color: Colors.white70, fontSize: 12.5, fontWeight: FontWeight.bold)),
                 const SizedBox(height: 8),
                 Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [2, 3, 4, 5, 6].map((cnt) {
                     final sel = cnt == maxPlayers;
-                    return InkWell(
-                      onTap: () => setDialogState(() => maxPlayers = cnt),
-                      borderRadius: BorderRadius.circular(10),
+                    return Expanded(
                       child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                        decoration: BoxDecoration(
-                          color: sel ? const Color(0xFFD4AF37) : Colors.black38,
+                        margin: const EdgeInsets.symmetric(horizontal: 2),
+                        child: InkWell(
+                          onTap: () => setDialogState(() => maxPlayers = cnt),
                           borderRadius: BorderRadius.circular(10),
-                          border: Border.all(color: sel ? const Color(0xFFFDE047) : Colors.white24),
-                        ),
-                        child: Text(
-                          '$cnt Kişilik',
-                          style: TextStyle(
-                            color: sel ? Colors.black : Colors.white,
-                            fontWeight: FontWeight.bold,
-                            fontSize: 11.5,
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(vertical: 8),
+                            decoration: BoxDecoration(
+                              color: sel ? const Color(0xFFD4AF37) : Colors.black38,
+                              borderRadius: BorderRadius.circular(10),
+                              border: Border.all(color: sel ? const Color(0xFFFDE047) : Colors.white24),
+                            ),
+                            child: Center(
+                              child: Text(
+                                '$cnt Kişi',
+                                style: TextStyle(
+                                  color: sel ? Colors.black : Colors.white,
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 10.5,
+                                ),
+                              ),
+                            ),
                           ),
                         ),
                       ),
@@ -1049,7 +1055,10 @@ class _LobbyScreenState extends State<LobbyScreen> {
                   keyboardType: TextInputType.number,
                   style: const TextStyle(color: Colors.white, fontSize: 13),
                   decoration: InputDecoration(
-                    prefixIcon: const Icon(Icons.monetization_on, color: Color(0xFFD4AF37), size: 18),
+                    prefixIcon: const Padding(
+                      padding: EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+                      child: Text('🪙', style: TextStyle(fontSize: 16)),
+                    ),
                     filled: true,
                     fillColor: Colors.black26,
                     contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
@@ -1493,17 +1502,67 @@ class _LobbyScreenState extends State<LobbyScreen> {
 
           const SizedBox(height: 24),
 
-          // ÇIKIŞ YAP KÜÇÜK BUTONU
-          TextButton.icon(
-            onPressed: () async {
-              await service.logout();
-              if (!mounted) return;
-              Navigator.of(context).pushReplacement(
-                MaterialPageRoute(builder: (_) => const LoginScreen()),
+          // ŞIK & UI-FRIENDLY ÇIKIŞ BUTONU
+          InkWell(
+            borderRadius: BorderRadius.circular(20),
+            onTap: () async {
+              final confirm = await showDialog<bool>(
+                context: context,
+                builder: (ctx) => AlertDialog(
+                  backgroundColor: const Color(0xFF0E2F21),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(16),
+                    side: const BorderSide(color: Color(0xFFD4AF37), width: 1.2),
+                  ),
+                  title: const Text('Çıkış Yapılsın mı?', style: TextStyle(color: Color(0xFFFDE047), fontWeight: FontWeight.bold)),
+                  content: const Text('Hesabınızdan çıkış yapmak istediğinize emin misiniz?', style: TextStyle(color: Colors.white70)),
+                  actions: [
+                    TextButton(
+                      onPressed: () => Navigator.pop(ctx, false),
+                      child: const Text('Vazgeç', style: TextStyle(color: Colors.white60)),
+                    ),
+                    ElevatedButton(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.red.shade800,
+                        foregroundColor: Colors.white,
+                      ),
+                      onPressed: () => Navigator.pop(ctx, true),
+                      child: const Text('Çıkış'),
+                    ),
+                  ],
+                ),
               );
+              if (confirm == true) {
+                await service.logout();
+                if (!mounted) return;
+                Navigator.of(context).pushReplacement(
+                  MaterialPageRoute(builder: (_) => const LoginScreen()),
+                );
+              }
             },
-            icon: const Icon(Icons.logout, size: 16, color: Colors.white38),
-            label: const Text('Oturumu Kapat', style: TextStyle(color: Colors.white38, fontSize: 12)),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 8),
+              decoration: BoxDecoration(
+                color: Colors.white.withValues(alpha: 0.06),
+                borderRadius: BorderRadius.circular(20),
+                border: Border.all(color: Colors.white.withValues(alpha: 0.15)),
+              ),
+              child: const Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.power_settings_new_rounded, size: 16, color: Color(0xFFF87171)),
+                  SizedBox(width: 6),
+                  Text(
+                    'Çıkış',
+                    style: TextStyle(
+                      color: Colors.white70,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
+              ),
+            ),
           ),
           const SizedBox(height: 16),
         ],
@@ -1706,7 +1765,7 @@ class _LobbyScreenState extends State<LobbyScreen> {
         // KAPASİTE FİLTRELERİ (Tümü, 2 Kişilik, 3 Kişilik, 4 Kişilik, 5+ Kişilik)
         SingleChildScrollView(
           scrollDirection: Axis.horizontal,
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+          padding: const EdgeInsets.only(left: 16, right: 24, top: 4, bottom: 4),
           child: Row(
             children: [
               _buildCapacityChip(0, 'Tümü'),

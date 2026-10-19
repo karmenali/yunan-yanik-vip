@@ -22,7 +22,6 @@ class _TableScreenState extends State<TableScreen> {
   String? _selectedCardId;
   String? _draggingCardId;
   Offset _dragLocalPos = Offset.zero;
-  bool _dragReadyToDiscardUp = false;
 
   bool _showScoreboardModal = false;
   bool _showChatDrawer = false;
@@ -87,10 +86,31 @@ class _TableScreenState extends State<TableScreen> {
     _effectSub = gs.effectStreamController.stream.listen((eff) {
       if (!mounted) return;
       SoundFx.playCardTap();
-      setState(() => _floatingEffects.add(eff));
-      Future.delayed(const Duration(milliseconds: 2200), () {
+      final senderUid = eff['senderUserId']?.toString();
+      final key = eff['effectKey']?.toString() ?? '';
+      const emojiMap = {
+        'bomb': '💣💥',
+        'tomato': '🍅💦',
+        'rose': '🌹✨',
+        'clap': '👏🎉',
+        'laugh': '😂🔥',
+        'cry': '😭💧',
+      };
+      final emoji = emojiMap[key] ?? '✨';
+      setState(() {
+        _floatingEffects.add(eff);
+        if (senderUid != null && senderUid.isNotEmpty) {
+          _seatSpeechBubbles[senderUid] = emoji;
+        }
+      });
+      Future.delayed(const Duration(milliseconds: 2500), () {
         if (mounted) {
-          setState(() => _floatingEffects.remove(eff));
+          setState(() {
+            _floatingEffects.remove(eff);
+            if (senderUid != null && _seatSpeechBubbles[senderUid] == emoji) {
+              _seatSpeechBubbles.remove(senderUid);
+            }
+          });
         }
       });
     });
@@ -278,7 +298,7 @@ class _TableScreenState extends State<TableScreen> {
         table.seats.any((s) => s?.userId == myId && !s!.isEliminated);
 
     if (isSeatedInActiveMatch) {
-      final action = await showDialog<String>(
+      final shouldLeave = await showDialog<bool>(
         context: context,
         builder: (ctx) => AlertDialog(
           backgroundColor: const Color(0xFF0E2F21),
@@ -286,52 +306,52 @@ class _TableScreenState extends State<TableScreen> {
             borderRadius: BorderRadius.circular(18),
             side: const BorderSide(color: Color(0xFFD4AF37), width: 1.5),
           ),
-          title: const Text(
-            '⚠️ Masadan Ayrıl',
-            style: TextStyle(
-              color: Color(0xFFFDE047),
-              fontWeight: FontWeight.bold,
-              fontSize: 17,
-            ),
+          title: const Row(
+            children: [
+              Icon(Icons.warning_amber_rounded, color: Color(0xFFFDE047)),
+              SizedBox(width: 8),
+              Text(
+                'Masadan Kalk',
+                style: TextStyle(
+                  color: Color(0xFFFDE047),
+                  fontWeight: FontWeight.bold,
+                  fontSize: 17,
+                ),
+              ),
+            ],
           ),
           content: const Text(
-            'Oyun şu anda devam ediyor. Ne yapmak istiyorsunuz?\n\n'
-            '• Masayı Terk Et: Koltuğunuzu tamamen bırakırsınız ve lobide hemen yeni bir oda açabilirsiniz.\n\n'
-            '• Lobiye Dön: Koltuğunuz korunur, istediğiniz zaman "Aktif Masana Dön" butonuyla geri gelebilirsiniz.',
-            style: TextStyle(color: Colors.white70, fontSize: 12.5, height: 1.35),
+            'Devam eden oyundan kalkarsanız yatırdığınız giriş kredisini kaybedersiniz ve koltuğunuz boşaltılır.\n\nMasadan kalkmak istediğinize emin misiniz?',
+            style: TextStyle(color: Colors.white70, fontSize: 13, height: 1.4),
           ),
           actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(ctx, 'cancel'),
-              child: const Text('Vazgeç', style: TextStyle(color: Colors.white60)),
-            ),
-            TextButton(
-              onPressed: () => Navigator.pop(ctx, 'minimize'),
-              child: const Text('Lobiye Dön (Koru)',
-                  style: TextStyle(color: Color(0xFF67E8F9), fontWeight: FontWeight.bold)),
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFF059669),
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+              ),
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Devam Et', style: TextStyle(fontWeight: FontWeight.bold)),
             ),
             ElevatedButton(
               style: ElevatedButton.styleFrom(
                 backgroundColor: Colors.red.shade800,
                 foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
               ),
-              onPressed: () => Navigator.pop(ctx, 'forfeit'),
-              child: const Text(
-                'Masayı Terk Et',
-                style: TextStyle(fontWeight: FontWeight.bold),
-              ),
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Masadan Kalk', style: TextStyle(fontWeight: FontWeight.bold)),
             ),
           ],
         ),
       );
-      if (action == null || action == 'cancel') return;
+      if (shouldLeave != true) return;
 
       await gs.stopContinuousMic();
-      if (action == 'forfeit') {
-        gs.forfeitMatch();
-      } else {
-        gs.leaveCurrentTable();
-      }
+      gs.forfeitMatch();
       if (mounted) {
         Navigator.of(context).pop();
       }
@@ -642,6 +662,50 @@ class _TableScreenState extends State<TableScreen> {
                 children: [
                   _buildZyngaTopBar(table, gs),
 
+                  // BİLGİ / HATA BİLDİRİMİ (Üst barın altına yerleştirildi, sayaç ve skor asla kapanmaz)
+                  if (_toastBanner != null)
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 4),
+                      child: Material(
+                        color: Colors.transparent,
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 14,
+                            vertical: 7,
+                          ),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF0A2418).withValues(alpha: 0.96),
+                            borderRadius: BorderRadius.circular(20),
+                            border: Border.all(color: const Color(0xFFF59E0B)),
+                            boxShadow: const [
+                              BoxShadow(color: Colors.black87, blurRadius: 10),
+                            ],
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const Icon(
+                                Icons.notifications_active,
+                                color: Color(0xFFFBBF24),
+                                size: 15,
+                              ),
+                              const SizedBox(width: 8),
+                              Flexible(
+                                child: Text(
+                                  _toastBanner!,
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontWeight: FontWeight.bold,
+                                    fontSize: 11.5,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+
                   // ORTA CASINO MASASI (Saat Yönünde Koltuklar, Pot, Gösterge Jokeri, Deste ve Atılan Kağıt)
                   Expanded(
                     flex: 46,
@@ -677,53 +741,7 @@ class _TableScreenState extends State<TableScreen> {
             // 3. UÇAN EFEKT KATMANI
             ..._floatingEffects.map((eff) => _buildFloatingEffectOverlay(eff)),
 
-            // 4. BİLGİ / HATA BİLDİRİMİ
-            if (_toastBanner != null)
-              Positioned(
-                top: 94,
-                left: 20,
-                right: 20,
-                child: Center(
-                  child: Material(
-                    color: Colors.transparent,
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 16,
-                        vertical: 9,
-                      ),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFF0A2418).withValues(alpha: 0.96),
-                        borderRadius: BorderRadius.circular(20),
-                        border: Border.all(color: const Color(0xFFF59E0B)),
-                        boxShadow: const [
-                          BoxShadow(color: Colors.black87, blurRadius: 12),
-                        ],
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          const Icon(
-                            Icons.notifications_active,
-                            color: Color(0xFFFBBF24),
-                            size: 16,
-                          ),
-                          const SizedBox(width: 8),
-                          Flexible(
-                            child: Text(
-                              _toastBanner!,
-                              style: const TextStyle(
-                                color: Colors.white,
-                                fontWeight: FontWeight.bold,
-                                fontSize: 12,
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-              ),
+
 
             // 5. EL SONU ŞEFFAF ANİMASYONLU GÖSTERİM (10 SN AÇAN EL + SAAT YÖNÜNDE CEZA AÇILIŞI)
             if (isRoundEnd && !_showScoreboardModal)
@@ -1209,7 +1227,7 @@ class _TableScreenState extends State<TableScreen> {
     double w,
     double h,
   ) {
-    const double avatarWidth = 88.0;
+    const double avatarWidth = 76.0;
     final double leftX = 6.0;
     final double rightX = w - avatarWidth - 6.0;
 
@@ -1217,38 +1235,38 @@ class _TableScreenState extends State<TableScreen> {
     List<Offset> clockwiseSlots;
     if (count == 2) {
       clockwiseSlots = [
-        Offset(leftX + 8, h * 0.50), // Sen (Sol-Alt)
-        Offset(rightX - 8, h * 0.04), // Rakip (Sağ-Üst)
+        Offset(leftX + 2, h * 0.65), // Sen (Sol-Alt - ortadaki gösterge kartına asla değmez)
+        Offset((w - avatarWidth) / 2, h * 0.02), // Rakip (Üst-Orta)
       ];
     } else if (count == 3) {
       clockwiseSlots = [
-        Offset(leftX + 6, h * 0.52), // 0: Sen (Sol-Alt)
-        Offset(leftX + 10, h * 0.03), // 1: Sol-Üst
-        Offset(rightX - 10, h * 0.03), // 2: Sağ-Üst
+        Offset(leftX + 2, h * 0.65), // 0: Sen (Sol-Alt)
+        Offset(leftX + 4, h * 0.03), // 1: Sol-Üst
+        Offset(rightX - 4, h * 0.03), // 2: Sağ-Üst
       ];
     } else if (count == 4) {
       clockwiseSlots = [
-        Offset(leftX + 4, h * 0.52), // 0: Sen (Sol-Alt)
-        Offset(leftX + 8, h * 0.03), // 1: Sol-Üst
-        Offset(rightX - 8, h * 0.03), // 2: Sağ-Üst
-        Offset(rightX - 4, h * 0.52), // 3: Sağ-Alt
+        Offset(leftX + 2, h * 0.65), // 0: Sen (Sol-Alt)
+        Offset(leftX + 4, h * 0.03), // 1: Sol-Üst
+        Offset(rightX - 4, h * 0.03), // 2: Sağ-Üst
+        Offset(rightX - 2, h * 0.65), // 3: Sağ-Alt
       ];
     } else if (count == 5) {
       clockwiseSlots = [
-        Offset(leftX + 4, h * 0.58), // 0: Sen
-        Offset(leftX + 2, h * 0.26), // 1: Sol-Orta
-        Offset(leftX + 14, h * 0.02), // 2: Sol-Üst
-        Offset(rightX - 14, h * 0.02), // 3: Sağ-Üst
-        Offset(rightX - 4, h * 0.45), // 4: Sağ-Alt
+        Offset(leftX + 2, h * 0.66), // 0: Sen
+        Offset(leftX + 2, h * 0.32), // 1: Sol-Orta
+        Offset(leftX + 10, h * 0.02), // 2: Sol-Üst
+        Offset(rightX - 10, h * 0.02), // 3: Sağ-Üst
+        Offset(rightX - 2, h * 0.52), // 4: Sağ-Alt
       ];
     } else {
       clockwiseSlots = [
-        Offset(leftX + 4, h * 0.60), // 0: Sen
-        Offset(leftX + 2, h * 0.30), // 1: Sol-Orta
-        Offset(leftX + 12, h * 0.02), // 2: Sol-Üst
-        Offset(rightX - 12, h * 0.02), // 3: Sağ-Üst
-        Offset(rightX - 2, h * 0.30), // 4: Sağ-Orta
-        Offset(rightX - 4, h * 0.60), // 5: Sağ-Alt
+        Offset(leftX + 2, h * 0.66), // 0: Sen
+        Offset(leftX + 2, h * 0.34), // 1: Sol-Orta
+        Offset(leftX + 10, h * 0.02), // 2: Sol-Üst
+        Offset(rightX - 10, h * 0.02), // 3: Sağ-Üst
+        Offset(rightX - 2, h * 0.34), // 4: Sağ-Orta
+        Offset(rightX - 2, h * 0.66), // 5: Sağ-Alt
       ];
     }
 
@@ -1286,7 +1304,7 @@ class _TableScreenState extends State<TableScreen> {
               }
             : null,
         child: SizedBox(
-          width: 88,
+          width: 76,
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -1354,7 +1372,7 @@ class _TableScreenState extends State<TableScreen> {
         }
       },
       child: SizedBox(
-        width: 104,
+        width: 76,
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -1362,6 +1380,7 @@ class _TableScreenState extends State<TableScreen> {
               Container(
                 margin: const EdgeInsets.only(bottom: 3),
                 padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+                constraints: const BoxConstraints(maxWidth: 100),
                 decoration: BoxDecoration(
                   color: Colors.white,
                   borderRadius: BorderRadius.circular(10),
@@ -1371,12 +1390,15 @@ class _TableScreenState extends State<TableScreen> {
                 ),
                 child: Text(
                   speechBubble,
-                  maxLines: 1,
+                  maxLines: 2,
+                  softWrap: true,
                   overflow: TextOverflow.ellipsis,
+                  textAlign: TextAlign.center,
                   style: const TextStyle(
                     color: Colors.black87,
                     fontWeight: FontWeight.w800,
                     fontSize: 9.5,
+                    height: 1.15,
                   ),
                 ),
               ),
@@ -1817,13 +1839,8 @@ class _TableScreenState extends State<TableScreen> {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
       decoration: BoxDecoration(
-        color: _dragReadyToDiscardUp
-            ? const Color(0xFF10B981).withValues(alpha: 0.25)
-            : Colors.black.withValues(alpha: 0.22),
+        color: Colors.black.withValues(alpha: 0.22),
         borderRadius: BorderRadius.circular(16),
-        border: _dragReadyToDiscardUp
-            ? Border.all(color: const Color(0xFF4ADE80), width: 2)
-            : null,
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
@@ -2081,16 +2098,7 @@ class _TableScreenState extends State<TableScreen> {
                   ),
                 ),
               ),
-              if (_dragReadyToDiscardUp)
-                const Text(
-                  '🎯 Yere Atmak İçin Bırakın',
-                  style: TextStyle(
-                    color: Color(0xFF4ADE80),
-                    fontSize: 10,
-                    fontWeight: FontWeight.w900,
-                  ),
-                )
-              else if (selectedCard != null)
+              if (selectedCard != null)
                 Text(
                   'Seçili: ${selectedCard.rankLabel}${selectedCard.suitSymbol}',
                   style: const TextStyle(
@@ -2220,18 +2228,13 @@ class _TableScreenState extends State<TableScreen> {
 
             SoundFx.playCardTap();
             setState(() {
-              // Sürükleme işlemi kartı kalıcı olarak "seçili" bırakmaz!
               _draggingCardId = hit.id;
               _dragLocalPos = pos;
-              _dragReadyToDiscardUp = false;
             });
           },
           onPanUpdate: (details) {
             if (_draggingCardId == null) return;
             final pos = details.localPosition;
-            final canDiscardUp =
-                table.status == 'playing' && isMyTurn && hasDrawn && pos.dy < -18;
-
             final targetRow = (pos.dy / rowH).floor().clamp(0, 2);
             _moveDraggedCardToRowSlot(
               _draggingCardId!,
@@ -2243,31 +2246,13 @@ class _TableScreenState extends State<TableScreen> {
 
             setState(() {
               _dragLocalPos = pos;
-              _dragReadyToDiscardUp = canDiscardUp;
             });
           },
           onPanEnd: (_) {
             if (_draggingCardId == null) return;
-            final draggedId = _draggingCardId!;
-            final shouldDiscard = _dragReadyToDiscardUp &&
-                table.status == 'playing' &&
-                isMyTurn &&
-                hasDrawn;
-
             setState(() {
               _draggingCardId = null;
-              _dragReadyToDiscardUp = false;
             });
-
-            if (shouldDiscard) {
-              final card = _allLocalCards
-                  .cast<CardModel?>()
-                  .firstWhere((c) => c?.id == draggedId, orElse: () => null);
-              if (card != null) {
-                _tryDiscardCardWithConfirmation(card, table);
-                return;
-              }
-            }
 
             GameService.instance.reorderHand(
               orderedCardIds: _allLocalCards.map((c) => c.id).toList(),
@@ -2406,15 +2391,9 @@ class _TableScreenState extends State<TableScreen> {
         child: GestureDetector(
           onTap: () {
             SoundFx.playCardTap();
-            if (_selectedCardId == cardId) {
-              if (table.status == 'playing' && isMyTurn && hasDrawn) {
-                _tryDiscardCardWithConfirmation(card, table);
-              } else {
-                setState(() => _selectedCardId = null);
-              }
-            } else {
-              setState(() => _selectedCardId = cardId);
-            }
+            setState(() {
+              _selectedCardId = (_selectedCardId == cardId) ? null : cardId;
+            });
           },
           child: Transform.scale(
             scale: isDragging ? 1.06 : 1.0,
@@ -2674,7 +2653,7 @@ class _TableScreenState extends State<TableScreen> {
                                 ? (opener.isFalseDeclarer
                                     ? '${opener.username} HATALI EL AÇTI! ($stage1RemainingSec sn)'
                                     : '${opener.username} EL AÇTI! ($stage1RemainingSec sn Masada Açık)')
-                                : '🔄 SAAT YÖNÜNDE CEZA PUANLARI AÇILIYOR (${table.turnRemainingSeconds}s)',
+                                : '🔄 CEZA PUANLARI SIRAYLA AÇILIYOR (${table.turnRemainingSeconds}s)',
                             style: const TextStyle(
                               color: Color(0xFFFDE047),
                               fontWeight: FontWeight.w900,
@@ -2685,7 +2664,7 @@ class _TableScreenState extends State<TableScreen> {
                           Text(
                             isStage1OpenerShowcase
                                 ? 'Açılan el 10 saniye boyunca masadaki tüm oyunculara şeffaf gösterilir.'
-                                : 'Kalan oyuncuların elleri saat yönünde sırayla açılıp cezaları toplama ekleniyor.',
+                                : 'Kalan oyuncuların elleri soldan sağa sırayla açılıp cezaları toplama ekleniyor.',
                             style: const TextStyle(
                               color: Colors.white70,
                               fontSize: 10.5,
@@ -2773,6 +2752,7 @@ class _TableScreenState extends State<TableScreen> {
                       const SizedBox(height: 8),
                       SingleChildScrollView(
                         scrollDirection: Axis.horizontal,
+                        padding: const EdgeInsets.only(right: 18),
                         child: Row(
                           children: [
                             for (final meld in opener.melds) ...[
@@ -2927,15 +2907,31 @@ class _TableScreenState extends State<TableScreen> {
                                       final animPen = val.round();
                                       final animTot =
                                           sd.previousScore + animPen;
-                                      return Text(
-                                        '+$animPen Ceza  ➔  Toplam: $animTot/101 ${sd.burnedThisRound ? "🔥 YANDI" : ""}',
-                                        style: TextStyle(
-                                          color: sd.burnedThisRound
-                                              ? Colors.redAccent
-                                              : const Color(0xFFFDE047),
-                                          fontWeight: FontWeight.w900,
-                                          fontSize: 11.5,
-                                        ),
+                                      return Column(
+                                        crossAxisAlignment: CrossAxisAlignment.end,
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          Text(
+                                            '+$animPen Ceza',
+                                            style: TextStyle(
+                                              color: animPen == 0
+                                                  ? const Color(0xFF4ADE80)
+                                                  : const Color(0xFFF87171),
+                                              fontWeight: FontWeight.w900,
+                                              fontSize: 12,
+                                            ),
+                                          ),
+                                          Text(
+                                            'Toplam: $animTot/101 ${sd.burnedThisRound ? "🔥 YANDI" : ""}',
+                                            style: TextStyle(
+                                              color: sd.burnedThisRound
+                                                  ? Colors.redAccent
+                                                  : const Color(0xFFFDE047),
+                                              fontWeight: FontWeight.w800,
+                                              fontSize: 10,
+                                            ),
+                                          ),
+                                        ],
                                       );
                                     },
                                   )
@@ -2953,6 +2949,7 @@ class _TableScreenState extends State<TableScreen> {
                             if (isRevealedYet)
                               SingleChildScrollView(
                                 scrollDirection: Axis.horizontal,
+                                padding: const EdgeInsets.only(right: 18),
                                 child: Row(
                                   children: [
                                     if (sd.unmelded.isNotEmpty)
@@ -3550,32 +3547,30 @@ class _TableScreenState extends State<TableScreen> {
     final key = eff['effectKey']?.toString() ?? '';
     final emoji = emojiMap[key] ?? '✨';
     return Positioned(
-      top: 128,
-      left: 24,
-      right: 24,
+      top: 140,
+      left: 0,
+      right: 0,
       child: IgnorePointer(
         child: TweenAnimationBuilder<double>(
-          tween: Tween(begin: 0.0, end: 1.0),
-          duration: const Duration(milliseconds: 550),
+          tween: Tween(begin: 0.2, end: 1.0),
+          duration: const Duration(milliseconds: 600),
           curve: Curves.elasticOut,
           builder: (context, val, _) => Transform.scale(
             scale: val,
             child: Center(
               child: Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
+                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
                 decoration: BoxDecoration(
-                  color: Colors.black.withValues(alpha: 0.88),
+                  color: Colors.black.withValues(alpha: 0.65),
                   borderRadius: BorderRadius.circular(30),
-                  border: Border.all(color: const Color(0xFFF59E0B), width: 1.5),
+                  border: Border.all(color: const Color(0xFFFDE047), width: 1.5),
+                  boxShadow: const [
+                    BoxShadow(color: Colors.black87, blurRadius: 16),
+                  ],
                 ),
                 child: Text(
-                  '$emoji  ${eff['senderUsername'] ?? ''} ➔ ${eff['effectName'] ?? ''}',
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontWeight: FontWeight.bold,
-                    fontSize: 13,
-                  ),
+                  emoji,
+                  style: const TextStyle(fontSize: 34, height: 1.0),
                 ),
               ),
             ),
