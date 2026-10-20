@@ -768,6 +768,17 @@ io.on('connection', (socket) => {
     }
   });
 
+  // Tur Bitiminde "Devam Et" Oyu
+  socket.on('vote_continue_round', async (data, cb) => {
+    try {
+      await tableManager.voteContinue(user.userId, String(data?.tableId));
+      if (cb) cb({ ok: true });
+    } catch (err: any) {
+      if (cb) cb({ ok: false, error: err.message });
+      else socket.emit('error_msg', err.message);
+    }
+  });
+
   // Oda İçi Yazılı Sohbet (Oda üyeliği + Karakter sınırı + Argo filtresi + Rate limit korumalı)
   socket.on('send_chat', async (data) => {
     const tableId = String(data?.tableId || '');

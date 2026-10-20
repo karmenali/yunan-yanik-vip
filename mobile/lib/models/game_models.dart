@@ -144,6 +144,7 @@ class SeatPlayerModel {
   final bool forfeitedRebuy;
   final int rebuyCount;
   final bool awaitingRebuyDecision;
+  final bool votedContinue;
   final int cardCount;
 
   SeatPlayerModel({
@@ -159,6 +160,7 @@ class SeatPlayerModel {
     this.forfeitedRebuy = false,
     required this.rebuyCount,
     required this.awaitingRebuyDecision,
+    this.votedContinue = false,
     required this.cardCount,
   });
 
@@ -176,6 +178,7 @@ class SeatPlayerModel {
       forfeitedRebuy: json['forfeitedRebuy'] == true,
       rebuyCount: int.tryParse(json['rebuyCount']?.toString() ?? '0') ?? 0,
       awaitingRebuyDecision: json['awaitingRebuyDecision'] == true,
+      votedContinue: json['votedContinue'] == true,
       cardCount: int.tryParse(json['cardCount']?.toString() ?? '0') ?? 0,
     );
   }
@@ -202,6 +205,7 @@ class ShowdownPlayerResultModel {
   final int rebuyMultiplier;
   final int rebuyCost;
   final int rebuyTargetScore;
+  final bool votedContinue;
 
   ShowdownPlayerResultModel({
     required this.userId,
@@ -224,6 +228,7 @@ class ShowdownPlayerResultModel {
     required this.rebuyMultiplier,
     required this.rebuyCost,
     required this.rebuyTargetScore,
+    this.votedContinue = false,
   });
 
   factory ShowdownPlayerResultModel.fromJson(Map<String, dynamic> json) {
@@ -260,6 +265,7 @@ class ShowdownPlayerResultModel {
       rebuyMultiplier: int.tryParse(json['rebuyMultiplier']?.toString() ?? '1') ?? 1,
       rebuyCost: int.tryParse(json['rebuyCost']?.toString() ?? '0') ?? 0,
       rebuyTargetScore: int.tryParse(json['rebuyTargetScore']?.toString() ?? '0') ?? 0,
+      votedContinue: json['votedContinue'] == true,
     );
   }
 }

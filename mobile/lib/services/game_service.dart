@@ -831,6 +831,11 @@ class GameService extends ChangeNotifier {
     _socket?.emit('rebuy', {'tableId': activeTable!.id});
   }
 
+  void voteContinueRound() {
+    if (activeTable == null) return;
+    _socket?.emit('vote_continue_round', {'tableId': activeTable!.id});
+  }
+
   void sendChatMessage(String text) {
     if (activeTable == null || text.trim().isEmpty) return;
     final clean = text.trim();

@@ -24,6 +24,7 @@ export interface SeatPlayer {
   forfeitedRebuy: boolean; // Yardımsız modda hatalı el açarsa re-buy hakkını tamamen kaybeder
   rebuyCount: number; // Kaç kez yandı ve geri döndü (0 -> ilk yanışta 1x öder, 1 -> 2x öder, 2 -> 3x öder)
   awaitingRebuyDecision: boolean;
+  votedContinue?: boolean; // Showdown'da "Devam Et" butonuna bastı mı
   consecutiveTimeouts: number;
   isBot?: boolean;
   hand: Card[];
@@ -61,6 +62,7 @@ export interface ShowdownPlayerResult {
   rebuyMultiplier: number;
   rebuyCost: number;
   rebuyTargetScore: number;
+  votedContinue?: boolean;
 }
 
 export interface GameTable {
@@ -1012,6 +1014,7 @@ export class TableManager {
     for (const seat of table.seats) {
       if (!seat) continue;
       seat.awaitingRebuyDecision = false;
+      seat.votedContinue = false;
       if (!seat.isEliminated) {
         const dealt = hands[seat.userId] || [];
         if (table.isAssisted) {
@@ -1037,16 +1040,26 @@ export class TableManager {
     table.currentTurnSeat = this.getNextActiveSeatIndex(table, table.dealerSeat);
     table.hasDrawnThisTurn = false;
 
+    const dealingDurationMs = 3500;
     this.io.to(`table:${table.id}`).emit('round_started', {
       roundNumber: table.roundNumber,
       indicatorCard: table.indicatorCard,
       wildRank: table.wildRank,
       dealerSeat: table.dealerSeat,
       currentTurnSeat: table.currentTurnSeat,
+      dealingDurationMs,
     });
 
-    this.startTurnTimer(table);
     this.broadcastTableState(table.id);
+
+    // Kart dağıtım animasyonu (3.5 saniye) tamamlandıktan sonra süreyi başlat
+    table.phaseTimer = setTimeout(() => {
+      this.enqueueTableAction(table.id, () => {
+        if (table.status === 'playing') {
+          this.startTurnTimer(table);
+        }
+      });
+    }, dealingDurationMs);
   }
 
   private getNextActiveSeatIndex(table: GameTable, fromSeat: number): number {
@@ -1528,14 +1541,18 @@ export class TableManager {
     const worstSurvivorScore =
       survivors.length > 0 ? Math.max(...survivors.map((s) => s.totalScore)) : 0;
 
-    // KURAL: Son 2 oyuncu kaldığında yanan oyuncu geri dönemez!
-    // Ayrıca Yardımsız Modda hatalı el açan oyuncu (`forfeitedRebuy = true`) ASLA Re-buy yapamaz!
-    const rebuyAllowedInThisRound =
-      table.activePlayersAtRoundStart > 2 || survivors.length >= 2;
+    // KURAL: Eğer geriye tek bir kişi kaldıysa (açan kişi hariç herkes 101 ve üzerine çıktıysa),
+    // diğerlerinin kredisi olsa bile tekrar giremezler! Açan kişi oyunu anında kazanır!
+    // Re-buy ancak ve ancak en az 2 oyuncu hayatta kalmaya devam ediyorsa mümkündür.
+    const isSingleSurvivorGameWin = survivors.length <= 1;
+    const rebuyAllowedInThisRound = !isSingleSurvivorGameWin && survivors.length >= 2;
 
     let anyAwaitingRebuy = false;
     for (const sd of showdownResults) {
       const seat = table.seats.find((s) => s?.userId === sd.userId);
+      if (seat) {
+        seat.votedContinue = false;
+      }
       if (
         sd.burnedThisRound &&
         rebuyAllowedInThisRound &&
@@ -1546,14 +1563,24 @@ export class TableManager {
         sd.rebuyTargetScore = worstSurvivorScore;
         seat.awaitingRebuyDecision = true;
         anyAwaitingRebuy = true;
+      }
+    }
 
-        if (seat.isBot && seat.rebuyCount < 2) {
-          setTimeout(() => {
-            this.rebuyIntoMatch(seat.userId, table.id).catch((e) => {
-              console.error('Bot rebuy hatası:', e);
-            });
-          }, 3000);
-        }
+    // Botlar için otomatik Re-buy ve Devam Et kararları
+    if (!isSingleSurvivorGameWin) {
+      for (const seat of table.seats) {
+        if (!seat || !seat.isBot) continue;
+        const botDelayMs = 2500 + Math.floor(Math.random() * 2000);
+        setTimeout(() => {
+          this.enqueueTableAction(table.id, async () => {
+            if (table.status !== 'round_summary') return;
+            if (seat.isEliminated && seat.awaitingRebuyDecision && seat.rebuyCount < 2) {
+              await this.rebuyIntoMatch(seat.userId, table.id).catch(() => {});
+            } else if (!seat.isEliminated && !seat.votedContinue) {
+              await this.voteContinue(seat.userId, table.id);
+            }
+          });
+        }, botDelayMs);
       }
     }
 
@@ -1565,12 +1592,9 @@ export class TableManager {
       falseDeclarerUserId,
     });
 
-    const othersCount = hasLeadShowcase
-      ? Math.max(0, orderedPlayers.length - 1)
-      : orderedPlayers.length;
-    const totalRevealMs = openerShowcaseMs + othersCount * perOpponentRevealMs;
-    const decisionBufferMs = anyAwaitingRebuy ? 10000 : 5000;
-    const waitMs = Math.max(12000, totalRevealMs + decisionBufferMs);
+    // Tek kişi kaldıysa şampiyonluğu ve elleri görmek için 8 saniye yeterlidir;
+    // Devam eden oyunlarda ise oyuncuların elleri inceleyip "Devam Et" oyu vermesi için 60 saniye süre tanınır!
+    const waitMs = isSingleSurvivorGameWin ? 8000 : 60000;
 
     table.status = 'round_summary';
     table.lastShowdown = showdownResults;
@@ -1654,6 +1678,7 @@ export class TableManager {
       seat.rebuyCount += 1;
       seat.totalScore = targetScore;
       seat.isEliminated = false;
+      seat.votedContinue = true;
 
       try {
         await db.upsertMatchEscrow(table.id, table.name, table.pot, table.matchContributions);
@@ -1667,6 +1692,7 @@ export class TableManager {
           sd.burnedThisRound = false;
           sd.canRebuy = false;
           sd.newTotalScore = targetScore;
+          sd.votedContinue = true;
         }
       }
 
@@ -1681,14 +1707,70 @@ export class TableManager {
 
       this.broadcastTableState(table.id);
       this.broadcastLobbyTables();
+
+      // Eğer oyundaki tüm aktif oyuncular devam veya rebuy kararı verdiyse bekletmeden hemen başla
+      const activeSeats = table.seats.filter(
+        (s): s is SeatPlayer => s !== null && (!s.isEliminated || s.awaitingRebuyDecision)
+      );
+      const allDone = activeSeats.every((s) => !s.isEliminated && s.votedContinue);
+      if (allDone && activeSeats.length >= 2) {
+        if (table.phaseTimer) clearTimeout(table.phaseTimer);
+        this.proceedAfterRoundSummary(table);
+      }
+    });
+  }
+
+  /**
+   * Tur bitiminde oyuncunun "Devam Et" onayı vermesi
+   */
+  async voteContinue(userId: string, tableId: string): Promise<void> {
+    return this.enqueueTableAction(tableId, async () => {
+      const table = this.tables.get(tableId);
+      if (!table || table.status !== 'round_summary') return;
+
+      const seat = table.seats.find((s) => s?.userId === userId);
+      if (!seat || seat.isEliminated || seat.votedContinue) return;
+
+      seat.votedContinue = true;
+      if (table.lastShowdown) {
+        const sd = table.lastShowdown.find((x) => x.userId === userId);
+        if (sd) sd.votedContinue = true;
+      }
+
+      this.io.to(`table:${table.id}`).emit('player_voted_continue', {
+        userId: seat.userId,
+        username: seat.username,
+      });
+
+      this.broadcastTableState(table.id);
+
+      // Tüm hayatta olan oyuncular (veya re-buy beklemeyenler) "Devam Et" dediyse süreyi beklemeden hemen başlat
+      const activeSeats = table.seats.filter(
+        (s): s is SeatPlayer => s !== null && (!s.isEliminated || s.awaitingRebuyDecision)
+      );
+      const allDone = activeSeats.every((s) => !s.isEliminated && s.votedContinue);
+      if (allDone && activeSeats.length >= 2) {
+        if (table.phaseTimer) clearTimeout(table.phaseTimer);
+        this.proceedAfterRoundSummary(table);
+      }
     });
   }
 
   private proceedAfterRoundSummary(table: GameTable) {
     if (table.phaseTimer) clearTimeout(table.phaseTimer);
 
+    // 60 saniye içinde Devam Et butonuna basmayan veya rebuy yapmayan oyuncular yanar ve kredilerini kaybeder!
     for (const s of table.seats) {
-      if (s) s.awaitingRebuyDecision = false;
+      if (!s) continue;
+      if (s.awaitingRebuyDecision) {
+        s.awaitingRebuyDecision = false;
+        s.isEliminated = true;
+        s.forfeitedRebuy = true;
+      } else if (!s.isEliminated && !s.votedContinue) {
+        // Süresi bitti ve 'Devam Et' demedi -> oyundan elenir!
+        s.isEliminated = true;
+        s.forfeitedRebuy = true;
+      }
     }
 
     const survivors = table.seats.filter(
@@ -2116,6 +2198,7 @@ export class TableManager {
           forfeitedRebuy: s.forfeitedRebuy,
           rebuyCount: s.rebuyCount,
           awaitingRebuyDecision: s.awaitingRebuyDecision,
+          votedContinue: s.votedContinue,
           cardCount: s.hand.length,
         };
       }),

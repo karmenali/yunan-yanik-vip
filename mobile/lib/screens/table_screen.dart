@@ -28,6 +28,10 @@ class _TableScreenState extends State<TableScreen> {
   bool _dismissedWinnerModal = false;
   String? _lastSeenWinnerId;
 
+  // 2'şer 2'şer Gerçekçi Kart Dağıtım Animasyonu
+  bool _isDealingCards = false;
+  int _dealingCardCycle = 0; // 0..5 (her döngüde herkese 2 kağıt)
+
   // El Sonu Şeffaf Animasyonlu Gösterim (İlk 10 sn Açan El + Saat Yönünde Sırayla Ceza Açılışı)
   Timer? _showdownTicker;
   int _showdownElapsedMs = 0;
@@ -118,7 +122,9 @@ class _TableScreenState extends State<TableScreen> {
     _cardAnimSub = gs.cardAnimStreamController.stream.listen((anim) {
       if (!mounted) return;
       final type = anim['type']?.toString();
-      if (type == 'draw' || type == 'discard') {
+      if (type == 'round_started') {
+        _startRealisticDealingAnimation();
+      } else if (type == 'draw' || type == 'discard') {
         setState(() => _activeFlyingCardAnim = anim);
         Future.delayed(const Duration(milliseconds: 420), () {
           if (mounted && _activeFlyingCardAnim == anim) {
@@ -157,6 +163,39 @@ class _TableScreenState extends State<TableScreen> {
     _toastTimer?.cancel();
     _chatCtrl.dispose();
     super.dispose();
+  }
+
+  /// Gerçekçi 2'şer 2'şer kart dağıtım animasyonu (5 turda herkese 2 kağıt dağıtılır + ses efekti)
+  void _startRealisticDealingAnimation() {
+    if (!mounted) return;
+    setState(() {
+      _isDealingCards = true;
+      _dealingCardCycle = 0;
+    });
+
+    int cycle = 0;
+    Timer.periodic(const Duration(milliseconds: 650), (timer) {
+      if (!mounted) {
+        timer.cancel();
+        return;
+      }
+      cycle++;
+      SoundFx.playCardSlide();
+      setState(() {
+        _dealingCardCycle = cycle;
+      });
+
+      if (cycle >= 5) {
+        timer.cancel();
+        Future.delayed(const Duration(milliseconds: 350), () {
+          if (mounted) {
+            setState(() {
+              _isDealingCards = false;
+            });
+          }
+        });
+      }
+    });
   }
 
   void _startShowdownAnimationTimer({bool reset = false}) {
@@ -741,7 +780,8 @@ class _TableScreenState extends State<TableScreen> {
             // 3. UÇAN EFEKT KATMANI
             ..._floatingEffects.map((eff) => _buildFloatingEffectOverlay(eff)),
 
-
+            // 4. 2'ŞER 2'ŞER GERÇEKÇİ KART DAĞITIM ANİMASYONU KATMANI
+            if (_isDealingCards) _buildDealingCardsOverlay(table, mySeatIdx),
 
             // 5. EL SONU ŞEFFAF ANİMASYONLU GÖSTERİM (10 SN AÇAN EL + SAAT YÖNÜNDE CEZA AÇILIŞI)
             if (isRoundEnd && !_showScoreboardModal)
@@ -3066,7 +3106,8 @@ class _TableScreenState extends State<TableScreen> {
                 ),
               ),
 
-              // 3. YANAN OYUNCU İÇİN RE-BUY BUTONU VEYA HATALI EL AÇMA CEZASI UYARISI
+              // 3. YANAN OYUNCU İÇİN RE-BUY BUTONU, DEVAM ET OYLAMASI VEYA HATALI EL AÇMA CEZASI UYARISI
+              const SizedBox(height: 10),
               if (myShowdown != null && myShowdown.forfeitedRebuy)
                 Container(
                   width: double.infinity,
@@ -3108,6 +3149,49 @@ class _TableScreenState extends State<TableScreen> {
                       ),
                     ),
                   ),
+                )
+              else if (mySeat != null && !mySeat.isEliminated)
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton.icon(
+                    onPressed: mySeat.votedContinue
+                        ? null
+                        : () => gs.voteContinueRound(),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: mySeat.votedContinue
+                          ? const Color(0xFF065F46)
+                          : const Color(0xFF10B981),
+                      foregroundColor: Colors.white,
+                      disabledBackgroundColor: const Color(0xFF065F46),
+                      disabledForegroundColor: Colors.white70,
+                      padding: const EdgeInsets.symmetric(vertical: 13),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(14),
+                        side: BorderSide(
+                          color: mySeat.votedContinue
+                              ? const Color(0xFF34D399)
+                              : Colors.transparent,
+                          width: 1.5,
+                        ),
+                      ),
+                    ),
+                    icon: Icon(
+                      mySeat.votedContinue
+                          ? Icons.check_circle
+                          : Icons.play_arrow_rounded,
+                      size: 20,
+                    ),
+                    label: Text(
+                      mySeat.votedContinue
+                          ? 'DEVAM OYU VERİLDİ (Diğerleri Bekleniyor...)'
+                          : 'DEVAM ET (${table.turnRemainingSeconds}s İçinde Basınız)',
+                      style: const TextStyle(
+                        fontWeight: FontWeight.w900,
+                        fontSize: 13,
+                        letterSpacing: 0.5,
+                      ),
+                    ),
+                  ),
                 ),
             ],
           ),
@@ -3117,7 +3201,7 @@ class _TableScreenState extends State<TableScreen> {
   }
 
   // ===========================================================================
-  // 5. PROFESYONEL 101 PUAN TABLOSU & YENİDEN GİRİŞ (RE-BUY) MODALI
+  // 5. DOĞAL ARKADAŞ KAĞIT ÇETELESİ (1. EL, 2. EL... AÇTI, CEZALAR, TOPLAM VE YANDI)
   // ===========================================================================
   Widget _buildScoreboardOverlay(
     TableStateModel table,
@@ -3132,215 +3216,425 @@ class _TableScreenState extends State<TableScreen> {
     };
     final myShowdown = mySeat != null ? showdownMap[mySeat.userId] : null;
 
+    // Gerçek hayattaki kağıt çetele geçmişi: table.scoreHistory
+    final history = table.scoreHistory;
+
     return Positioned.fill(
       child: Container(
-        color: Colors.black.withValues(alpha: 0.84),
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 28),
+        color: Colors.black.withValues(alpha: 0.88),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 24),
         child: Center(
           child: Container(
-            constraints: const BoxConstraints(maxWidth: 460, maxHeight: 590),
+            constraints: const BoxConstraints(maxWidth: 480, maxHeight: 620),
             padding: const EdgeInsets.all(16),
             decoration: BoxDecoration(
-              color: const Color(0xFF0A2318),
-              borderRadius: BorderRadius.circular(22),
+              // Otantik sarımsı kareli defter kağıdı görünümü
+              color: const Color(0xFFFBF8EE),
+              borderRadius: BorderRadius.circular(16),
               border: Border.all(
-                color: const Color(0xFFF59E0B).withValues(alpha: 0.65),
-                width: 1.5,
+                color: const Color(0xFFB45309),
+                width: 2.2,
               ),
               boxShadow: const [
-                BoxShadow(color: Colors.black87, blurRadius: 24),
+                BoxShadow(
+                  color: Colors.black87,
+                  blurRadius: 28,
+                  offset: Offset(0, 10),
+                ),
               ],
             ),
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
+                // Çetele Üst Başlığı (El yazısı/defter tarzı)
                 Row(
                   children: [
                     const Icon(
-                      Icons.leaderboard_rounded,
-                      color: Color(0xFFFBBF24),
-                      size: 22,
+                      Icons.edit_note_rounded,
+                      color: Color(0xFF78350F),
+                      size: 26,
                     ),
                     const SizedBox(width: 8),
                     Expanded(
-                      child: Text(
-                        isRoundEnd
-                            ? 'EL #${table.roundNumber} PUAN TABLOSU (${table.turnRemainingSeconds}s)'
-                            : '101 CEZA PUAN ÇİZELGESİ',
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontWeight: FontWeight.w900,
-                          fontSize: 14.5,
-                        ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text(
+                            '📝 OYUN ÇETELESİ (101 CEZA TABLOSU)',
+                            style: TextStyle(
+                              color: Color(0xFF451A03),
+                              fontWeight: FontWeight.w900,
+                              fontSize: 14,
+                              letterSpacing: 0.5,
+                            ),
+                          ),
+                          Text(
+                            isRoundEnd
+                                ? 'El #${table.roundNumber} Tamamlandı • Karar Süresi: ${table.turnRemainingSeconds}s'
+                                : 'Masa: ${table.name} • Toplam Havuz: ${table.pot} Kredi',
+                            style: const TextStyle(
+                              color: Color(0xFF92400E),
+                              fontWeight: FontWeight.w600,
+                              fontSize: 11,
+                            ),
+                          ),
+                        ],
                       ),
                     ),
                     IconButton(
                       onPressed: () =>
                           setState(() => _showScoreboardModal = false),
-                      icon: const Icon(Icons.close, color: Colors.white70),
+                      icon: const Icon(Icons.close, color: Color(0xFF78350F)),
                     ),
                   ],
                 ),
-                const Divider(color: Colors.white12),
-                Flexible(
-                  child: ListView.separated(
-                    shrinkWrap: true,
-                    itemCount: seatedPlayers.length,
-                    separatorBuilder: (_, _) =>
-                        const Divider(color: Colors.white10, height: 8),
-                    itemBuilder: (context, idx) {
-                      final s = seatedPlayers[idx];
-                      final sd = showdownMap[s.userId];
-                      final total = s.totalScore;
-                      final lastDelta = sd?.roundPenalty;
-                      final eliminated = s.isEliminated;
-                      final rebuyCount = s.rebuyCount;
+                const SizedBox(height: 8),
 
-                      return Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 10,
-                          vertical: 8,
+                // ÇETELE TABLOSU: Sütun Başlıkları (El No + Her Oyuncunun Adı)
+                Container(
+                  padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 6),
+                  decoration: const BoxDecoration(
+                    color: Color(0xFFEFE9D7),
+                    border: Border(
+                      top: BorderSide(color: Color(0xFF78350F), width: 1.5),
+                      bottom: BorderSide(color: Color(0xFF78350F), width: 1.5),
+                    ),
+                  ),
+                  child: Row(
+                    children: [
+                      const SizedBox(
+                        width: 52,
+                        child: Text(
+                          'EL',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            color: Color(0xFF451A03),
+                            fontWeight: FontWeight.w900,
+                            fontSize: 12,
+                          ),
                         ),
-                        decoration: BoxDecoration(
-                          color: eliminated
-                              ? Colors.redAccent.withValues(alpha: 0.12)
-                              : Colors.white.withValues(alpha: 0.03),
-                          borderRadius: BorderRadius.circular(10),
+                      ),
+                      const SizedBox(
+                        height: 20,
+                        child: VerticalDivider(color: Color(0xFF78350F), width: 8),
+                      ),
+                      ...seatedPlayers.map(
+                        (p) => Expanded(
+                          child: Text(
+                            p.username,
+                            textAlign: TextAlign.center,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              color: p.userId == mySeat?.userId
+                                  ? const Color(0xFF1E3A8A)
+                                  : const Color(0xFF451A03),
+                              fontWeight: FontWeight.w900,
+                              fontSize: 11.5,
+                            ),
+                          ),
                         ),
-                        child: Row(
-                          children: [
-                            Expanded(
-                              flex: 4,
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
+                      ),
+                    ],
+                  ),
+                ),
+
+                // ÇETELE GÖVDESİ: Her Elin Satırı (1. El, 2. El... Açtı / Ceza Puanı)
+                Flexible(
+                  child: history.isEmpty
+                      ? const Center(
+                          child: Padding(
+                            padding: EdgeInsets.all(24.0),
+                            child: Text(
+                              'Henüz el tamamlanmadı. İlk el bittiğinde cezalar buraya yazılacaktır.',
+                              textAlign: TextAlign.center,
+                              style: TextStyle(
+                                color: Color(0xFF92400E),
+                                fontStyle: FontStyle.italic,
+                                fontSize: 12,
+                              ),
+                            ),
+                          ),
+                        )
+                      : ListView.separated(
+                          shrinkWrap: true,
+                          padding: const EdgeInsets.symmetric(vertical: 4),
+                          itemCount: history.length,
+                          separatorBuilder: (_, _) => const Divider(
+                            color: Color(0xFFE2D9C2),
+                            height: 1,
+                            thickness: 1,
+                          ),
+                          itemBuilder: (context, idx) {
+                            final row = history[idx];
+                            final rNum = row['roundNumber'] ?? (idx + 1);
+                            final finisherId = row['finisherUserId']?.toString();
+                            final scores = Map<String, dynamic>.from(
+                              row['scoresByUser'] ?? {},
+                            );
+
+                            return Padding(
+                              padding: const EdgeInsets.symmetric(
+                                vertical: 6,
+                                horizontal: 6,
+                              ),
+                              child: Row(
                                 children: [
-                                  Text(
-                                    s.username,
-                                    style: const TextStyle(
-                                      color: Colors.white,
-                                      fontWeight: FontWeight.bold,
-                                      fontSize: 13,
+                                  SizedBox(
+                                    width: 52,
+                                    child: Text(
+                                      '$rNum. El',
+                                      textAlign: TextAlign.center,
+                                      style: const TextStyle(
+                                        color: Color(0xFF78350F),
+                                        fontWeight: FontWeight.bold,
+                                        fontSize: 11.5,
+                                      ),
                                     ),
                                   ),
-                                  if (s.forfeitedRebuy)
-                                    const Text(
-                                      '🚫 Hatalı El Açtı (Re-buy İptal)',
-                                      style: TextStyle(
-                                        color: Colors.redAccent,
-                                        fontSize: 10,
-                                      ),
-                                    )
-                                  else if (rebuyCount > 0)
-                                    Text(
-                                      '🔄 $rebuyCount kez yeniden girdi',
-                                      style: const TextStyle(
-                                        color: Colors.orangeAccent,
-                                        fontSize: 10,
-                                      ),
+                                  const SizedBox(
+                                    height: 18,
+                                    child: VerticalDivider(
+                                      color: Color(0xFFD6C8AC),
+                                      width: 8,
                                     ),
+                                  ),
+                                  ...seatedPlayers.map((p) {
+                                    final sc = scores[p.userId];
+                                    final isFinisher = finisherId == p.userId;
+                                    String text = '-';
+                                    Color col = const Color(0xFF1F2937);
+                                    FontWeight fw = FontWeight.w600;
+
+                                    if (isFinisher) {
+                                      text = 'AÇTI';
+                                      col = const Color(0xFF047857);
+                                      fw = FontWeight.w900;
+                                    } else if (sc != null) {
+                                      text = '+$sc';
+                                      col = const Color(0xFFB91C1C);
+                                      fw = FontWeight.bold;
+                                    }
+
+                                    return Expanded(
+                                      child: Text(
+                                        text,
+                                        textAlign: TextAlign.center,
+                                        style: TextStyle(
+                                          color: col,
+                                          fontWeight: fw,
+                                          fontSize: 12,
+                                        ),
+                                      ),
+                                    );
+                                  }),
                                 ],
                               ),
-                            ),
-                            Expanded(
-                              flex: 2,
-                              child: Text(
-                                lastDelta == null
-                                    ? '-'
-                                    : lastDelta == 0
-                                        ? '0 (Açtı)'
-                                        : '+$lastDelta',
+                            );
+                          },
+                        ),
+                ),
+
+                // ÇETELE EN ALT TOPLAM VE DURUM SATIRI
+                Container(
+                  padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 6),
+                  decoration: const BoxDecoration(
+                    color: Color(0xFFEFE9D7),
+                    border: Border(
+                      top: BorderSide(color: Color(0xFF78350F), width: 2),
+                      bottom: BorderSide(color: Color(0xFF78350F), width: 1.5),
+                    ),
+                  ),
+                  child: Row(
+                    children: [
+                      const SizedBox(
+                        width: 52,
+                        child: Text(
+                          'TOPLAM',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            color: Color(0xFF451A03),
+                            fontWeight: FontWeight.w900,
+                            fontSize: 11,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(
+                        height: 28,
+                        child: VerticalDivider(color: Color(0xFF78350F), width: 8),
+                      ),
+                      ...seatedPlayers.map((p) {
+                        final tot = p.totalScore;
+                        final isBurned = p.isEliminated || tot >= 101;
+
+                        return Expanded(
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text(
+                                '$tot',
                                 textAlign: TextAlign.center,
                                 style: TextStyle(
-                                  color: lastDelta == 0
-                                      ? const Color(0xFF34D399)
-                                      : Colors.white70,
-                                  fontWeight: FontWeight.bold,
-                                  fontSize: 12,
-                                ),
-                              ),
-                            ),
-                            Expanded(
-                              flex: 2,
-                              child: Text(
-                                '$total',
-                                textAlign: TextAlign.center,
-                                style: TextStyle(
-                                  color: total >= 101
-                                      ? Colors.redAccent
-                                      : const Color(0xFFFBBF24),
+                                  color: isBurned
+                                      ? const Color(0xFFB91C1C)
+                                      : const Color(0xFF1E3A8A),
                                   fontWeight: FontWeight.w900,
                                   fontSize: 14,
                                 ),
                               ),
-                            ),
-                            Expanded(
-                              flex: 3,
-                              child: Align(
-                                alignment: Alignment.centerRight,
-                                child: Container(
+                              if (isBurned)
+                                Container(
+                                  margin: const EdgeInsets.only(top: 2),
                                   padding: const EdgeInsets.symmetric(
-                                    horizontal: 7,
-                                    vertical: 3,
+                                    horizontal: 4,
+                                    vertical: 1,
                                   ),
                                   decoration: BoxDecoration(
-                                    color: eliminated
-                                        ? Colors.redAccent
-                                            .withValues(alpha: 0.25)
-                                        : const Color(0xFF10B981)
-                                            .withValues(alpha: 0.2),
-                                    borderRadius: BorderRadius.circular(6),
+                                    color: const Color(0xFFFEE2E2),
+                                    borderRadius: BorderRadius.circular(4),
+                                    border: Border.all(
+                                      color: const Color(0xFFEF4444),
+                                      width: 0.8,
+                                    ),
                                   ),
-                                  child: Text(
-                                    eliminated ? '🔥 YANDI' : 'DEVAM',
+                                  child: const Text(
+                                    'YANDI',
                                     style: TextStyle(
-                                      color: eliminated
-                                          ? Colors.redAccent
-                                          : const Color(0xFF34D399),
+                                      color: Color(0xFFB91C1C),
                                       fontWeight: FontWeight.w900,
-                                      fontSize: 10,
+                                      fontSize: 9,
                                     ),
                                   ),
                                 ),
-                              ),
-                            ),
-                          ],
-                        ),
-                      );
-                    },
+                            ],
+                          ),
+                        );
+                      }),
+                    ],
                   ),
                 ),
-                const SizedBox(height: 10),
-                Text(
-                  'Toplam ${table.scoreHistory.length} el oynandı • Havuz: ${table.pot} Kredi',
-                  style: const TextStyle(color: Colors.white54, fontSize: 11),
-                ),
-                if (isRoundEnd &&
-                    mySeat != null &&
-                    myShowdown != null &&
-                    myShowdown.canRebuy &&
-                    !myShowdown.forfeitedRebuy) ...[
+
+                // TUR SONU KARAR BUTONLARI (RE-BUY VEYA DEVAM ET)
+                if (isRoundEnd) ...[
                   const SizedBox(height: 12),
-                  SizedBox(
-                    width: double.infinity,
-                    child: ElevatedButton.icon(
-                      onPressed: () => gs.rebuyIntoMatch(),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: const Color(0xFFF59E0B),
-                        foregroundColor: Colors.black,
-                        padding: const EdgeInsets.symmetric(vertical: 12),
+                  if (myShowdown != null && myShowdown.forfeitedRebuy)
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(8),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFFEE2E2),
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(color: const Color(0xFFEF4444)),
                       ),
-                      icon: const Icon(Icons.replay_circle_filled),
-                      label: Text(
-                        'OYUNA TEKRAR DAHİL OL (${myShowdown.rebuyMultiplier}x = ${myShowdown.rebuyCost} Kredi • ${myShowdown.rebuyTargetScore} Puanla)',
-                        style: const TextStyle(
-                          fontWeight: FontWeight.w900,
-                          fontSize: 11.5,
+                      child: const Text(
+                        '🚫 Hatalı el açtığınız için re-buy hakkınız bulunmuyor.',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          color: Color(0xFF991B1B),
+                          fontWeight: FontWeight.bold,
+                          fontSize: 11,
+                        ),
+                      ),
+                    )
+                  else if (myShowdown != null && myShowdown.canRebuy)
+                    SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton.icon(
+                        onPressed: () => gs.rebuyIntoMatch(),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: const Color(0xFFD97706),
+                          foregroundColor: Colors.white,
+                          padding: const EdgeInsets.symmetric(vertical: 11),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                        ),
+                        icon: const Icon(Icons.replay_circle_filled, size: 18),
+                        label: Text(
+                          'OYUNA TEKRAR DAHİL OL (${myShowdown.rebuyMultiplier}x = ${myShowdown.rebuyCost} Kredi)',
+                          style: const TextStyle(fontWeight: FontWeight.w900),
+                        ),
+                      ),
+                    )
+                  else if (mySeat != null && !mySeat.isEliminated)
+                    SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton.icon(
+                        onPressed: mySeat.votedContinue
+                            ? null
+                            : () => gs.voteContinueRound(),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: const Color(0xFF059669),
+                          foregroundColor: Colors.white,
+                          disabledBackgroundColor: const Color(0xFF065F46),
+                          disabledForegroundColor: Colors.white70,
+                          padding: const EdgeInsets.symmetric(vertical: 11),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                        ),
+                        icon: Icon(
+                          mySeat.votedContinue
+                              ? Icons.check_circle
+                              : Icons.play_arrow_rounded,
+                          size: 18,
+                        ),
+                        label: Text(
+                          mySeat.votedContinue
+                              ? 'DEVAM OYU VERİLDİ'
+                              : 'DEVAM ET (${table.turnRemainingSeconds}s)',
+                          style: const TextStyle(fontWeight: FontWeight.w900),
                         ),
                       ),
                     ),
-                  ),
                 ],
               ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  // ===========================================================================
+  // 4.5. 2'ŞER 2'ŞER GERÇEKÇİ KART DAĞITIM ANİMASYON KATMANI (5 TURDA HERKESE 2 KART)
+  // ===========================================================================
+  Widget _buildDealingCardsOverlay(TableStateModel table, int mySeatIdx) {
+    return Positioned.fill(
+      child: IgnorePointer(
+        child: Container(
+          color: Colors.black.withValues(alpha: 0.15),
+          child: Center(
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
+              decoration: BoxDecoration(
+                color: const Color(0xFF0F172A).withValues(alpha: 0.90),
+                borderRadius: BorderRadius.circular(20),
+                border: Border.all(color: const Color(0xFFF59E0B), width: 1.5),
+                boxShadow: const [
+                  BoxShadow(color: Colors.black54, blurRadius: 16),
+                ],
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(
+                    Icons.style_rounded,
+                    color: Color(0xFFFBBF24),
+                    size: 22,
+                  ),
+                  const SizedBox(width: 10),
+                  Text(
+                    '🎴 Kartlar Dağıtılıyor... (${_dealingCardCycle * 2} / 10 Kağıt)',
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w900,
+                      fontSize: 13,
+                      letterSpacing: 0.4,
+                    ),
+                  ),
+                ],
+              ),
             ),
           ),
         ),
