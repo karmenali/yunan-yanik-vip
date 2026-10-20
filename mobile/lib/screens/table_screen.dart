@@ -694,27 +694,31 @@ class _TableScreenState extends State<TableScreen> {
         backgroundColor: const Color(0xFF06140E),
         body: Stack(
           children: [
-            // 1. ZYNGA 3D MAUN & ZÜMRÜT ÇUHA MASA ARKA PLAN GÖRSELİ
+            // 1. ZYNGA 3D MAUN & ZÜMRÜT ÇUHA MASA ARKA PLAN GÖRSELİ (İzole RepaintBoundary)
             Positioned.fill(
-              child: Image.asset(
-                'assets/images/table_bg.jpg',
-                fit: BoxFit.cover,
-                alignment: const Alignment(0, -0.2),
+              child: RepaintBoundary(
+                child: Image.asset(
+                  'assets/images/table_bg.jpg',
+                  fit: BoxFit.cover,
+                  alignment: const Alignment(0, -0.2),
+                ),
               ),
             ),
 
             Positioned.fill(
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  gradient: LinearGradient(
-                    begin: Alignment.topCenter,
-                    end: Alignment.bottomCenter,
-                    colors: [
-                      Colors.black.withValues(alpha: 0.45),
-                      Colors.transparent,
-                      Colors.black.withValues(alpha: 0.82),
-                    ],
-                    stops: const [0.0, 0.42, 1.0],
+              child: RepaintBoundary(
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.topCenter,
+                      end: Alignment.bottomCenter,
+                      colors: [
+                        Colors.black.withValues(alpha: 0.45),
+                        Colors.transparent,
+                        Colors.black.withValues(alpha: 0.82),
+                      ],
+                      stops: const [0.0, 0.42, 1.0],
+                    ),
                   ),
                 ),
               ),
@@ -788,14 +792,16 @@ class _TableScreenState extends State<TableScreen> {
                   // ALT OYUNCU ELİ: 3 SIRALI DİKEY ISTAKA + 60 FPS SÜRÜKLEME + 4 ZYNGA BUTONU
                   Expanded(
                     flex: 54,
-                    child: _buildThreeRowBottomHandAndControls(
-                      gs: gs,
-                      table: table,
-                      mySeat: mySeat,
-                      mySeatIdx: mySeatIdx,
-                      isMyTurn: isMyTurn,
-                      hasDrawn: hasDrawn,
-                      isPlaying: isPlaying,
+                    child: RepaintBoundary(
+                      child: _buildThreeRowBottomHandAndControls(
+                        gs: gs,
+                        table: table,
+                        mySeat: mySeat,
+                        mySeatIdx: mySeatIdx,
+                        isMyTurn: isMyTurn,
+                        hasDrawn: hasDrawn,
+                        isPlaying: isPlaying,
+                      ),
                     ),
                   ),
                 ],
@@ -1282,42 +1288,124 @@ class _TableScreenState extends State<TableScreen> {
                 ),
               ),
 
-            // UÇAN KART ANİMASYONU (Çekilen veya Atılan Kart)
+            // GERÇEKÇİ UÇAN KART ANİMASYONU (Desteden Ele / Elden Masaya)
             if (_activeFlyingCardAnim != null)
-              Center(
-                child: TweenAnimationBuilder<double>(
-                  tween: Tween(begin: 0.6, end: 1.0),
-                  duration: const Duration(milliseconds: 320),
-                  curve: Curves.easeOutBack,
-                  builder: (context, val, _) {
-                    return Transform.scale(
-                      scale: val,
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 12,
-                          vertical: 6,
-                        ),
-                        decoration: BoxDecoration(
-                          color: Colors.black87,
-                          borderRadius: BorderRadius.circular(14),
-                          border: Border.all(color: const Color(0xFFFDE047)),
-                        ),
-                        child: Text(
-                          _activeFlyingCardAnim!['type'] == 'draw'
-                              ? '🃏 Desteden Kağıt Çekildi'
-                              : '🃏 Yere Kağıt Atıldı',
-                          style: const TextStyle(
-                            color: Color(0xFFFDE047),
-                            fontWeight: FontWeight.w900,
-                            fontSize: 11,
-                          ),
-                        ),
-                      ),
-                    );
-                  },
-                ),
+              _buildRealisticFlyingCardOverlay(
+                anim: _activeFlyingCardAnim!,
+                w: w,
+                h: h,
+                seatPositions: seatPositions,
+                table: table,
+                mySeatIdx: mySeatIdx,
               ),
           ],
+        );
+      },
+    );
+  }
+
+  /// Desteden oyuncu eline süzülen veya elden masanın ortasına atılan gerçekçi kart animasyonu
+  Widget _buildRealisticFlyingCardOverlay({
+    required Map<String, dynamic> anim,
+    required double w,
+    required double h,
+    required List<Offset> seatPositions,
+    required TableStateModel table,
+    required int mySeatIdx,
+  }) {
+    final type = anim['type']?.toString();
+    final seatIdx = int.tryParse(anim['seatIndex']?.toString() ?? '-1') ?? -1;
+    final isMe = seatIdx == mySeatIdx && mySeatIdx != -1;
+
+    // Masadaki merkez deste ve atılan kart pozisyonu
+    final centerDeckPos = Offset(w / 2 - 24, h * 0.40);
+    final centerDiscardPos = Offset(w / 2 + 18, h * 0.40);
+
+    // Hedef / Başlangıç koltuk koordinatı (eğer bendeyse ekranın en alt ıstakasına doğru)
+    Offset targetSeatPos = isMe
+        ? Offset(w / 2 - 20, h * 0.90)
+        : (seatIdx >= 0 && seatIdx < seatPositions.length
+            ? seatPositions[seatIdx] + const Offset(15, 15)
+            : Offset(w / 2, h * 0.90));
+
+    final Offset startPos;
+    final Offset endPos;
+    final CardModel? cardModel = anim['card'] != null
+        ? CardModel.fromJson(Map<String, dynamic>.from(anim['card']))
+        : null;
+
+    if (type == 'draw') {
+      // Desteden oyuncunun eline/koltuğuna uçar
+      startPos = centerDeckPos;
+      endPos = targetSeatPos;
+    } else {
+      // Oyuncunun elinden/koltuğundan masanın ortasına atılır
+      startPos = targetSeatPos;
+      endPos = centerDiscardPos;
+    }
+
+    return TweenAnimationBuilder<double>(
+      key: ValueKey('fly_${anim['timestamp'] ?? DateTime.now().millisecondsSinceEpoch}'),
+      tween: Tween(begin: 0.0, end: 1.0),
+      duration: const Duration(milliseconds: 380),
+      curve: Curves.easeOutCubic,
+      builder: (context, progress, _) {
+        final currentPos = Offset.lerp(startPos, endPos, progress)!;
+        final scale = (progress < 0.5 ? 0.85 + progress * 0.4 : 1.05 - (progress - 0.5) * 0.1)
+            .clamp(0.80, 1.10);
+        final rotation = (progress * 0.15 * (type == 'draw' ? 1 : -1));
+
+        return Positioned(
+          left: currentPos.dx,
+          top: currentPos.dy,
+          child: IgnorePointer(
+            child: Transform.rotate(
+              angle: rotation,
+              child: Transform.scale(
+                scale: scale,
+                child: Container(
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(8),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withValues(alpha: 0.45 * (1.0 - progress * 0.3)),
+                        blurRadius: 12,
+                        offset: const Offset(0, 6),
+                      ),
+                    ],
+                  ),
+                  child: cardModel != null
+                      ? PlayingCardWidget(
+                          card: cardModel,
+                          wildRank: table.wildRank,
+                          width: 44,
+                          height: 64,
+                        )
+                      : Container(
+                          width: 44,
+                          height: 64,
+                          decoration: BoxDecoration(
+                            gradient: const LinearGradient(
+                              colors: [Color(0xFF1E3A8A), Color(0xFF172554)],
+                            ),
+                            borderRadius: BorderRadius.circular(8),
+                            border: Border.all(
+                              color: const Color(0xFFD4AF37),
+                              width: 1.5,
+                            ),
+                          ),
+                          child: const Center(
+                            child: Icon(
+                              Icons.style_rounded,
+                              color: Color(0xFFFBBF24),
+                              size: 22,
+                            ),
+                          ),
+                        ),
+                ),
+              ),
+            ),
+          ),
         );
       },
     );

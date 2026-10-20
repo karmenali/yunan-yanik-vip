@@ -121,8 +121,8 @@ class PlayingCardWidget extends StatelessWidget {
 
             // SOL ÜST KÖŞE İNDEKSİ (Sayı + Sembol)
             Positioned(
-              top: (height * 0.040).clamp(2.0, 4.5),
-              left: (width * 0.070).clamp(3.0, 5.5),
+              top: (height * 0.050).clamp(2.5, 5.0),
+              left: (width * 0.080).clamp(3.0, 6.0),
               child: _buildCornerIndex(
                 isPhysicalJoker: isPhysicalJoker,
                 suitColor: suitColor,
@@ -132,17 +132,17 @@ class PlayingCardWidget extends StatelessWidget {
             ),
 
             // SAĞ ALT KÖŞE TERS İNDEKS (Gerçek İskambil Kağıdı Simetrisi)
-            if (height >= 64)
+            if (height >= 60)
               Positioned(
-                bottom: (height * 0.040).clamp(2.0, 4.5),
-                right: (width * 0.070).clamp(3.0, 5.5),
+                bottom: (height * 0.050).clamp(2.5, 5.0),
+                right: (width * 0.080).clamp(3.0, 6.0),
                 child: Transform.rotate(
                   angle: math.pi,
                   child: _buildCornerIndex(
                     isPhysicalJoker: isPhysicalJoker,
                     suitColor: suitColor,
-                    rankFontSize: rankFontSize * 0.85,
-                    cornerSuitSize: cornerSuitSize * 0.85,
+                    rankFontSize: rankFontSize * 0.90,
+                    cornerSuitSize: cornerSuitSize * 0.90,
                   ),
                 ),
               ),
