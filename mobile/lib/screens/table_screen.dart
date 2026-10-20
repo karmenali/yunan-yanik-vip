@@ -2404,9 +2404,9 @@ class _TableScreenState extends State<TableScreen> {
       builder: (context, constraints) {
         final maxW = constraints.maxWidth;
         final maxH = constraints.maxHeight;
-        final rowH = (maxH / 3.0).clamp(68.0, 120.0);
-        final cardH = (rowH * 0.90).clamp(62.0, 108.0);
-        final cardW = (cardH * 0.70).clamp(44.0, 76.0);
+        final rowH = (maxH / 3.0).clamp(74.0, 130.0);
+        final cardH = (rowH * 0.94).clamp(68.0, 118.0);
+        final cardW = (cardH * 0.70).clamp(48.0, 84.0);
 
         return GestureDetector(
           behavior: HitTestBehavior.translucent,
@@ -2502,16 +2502,11 @@ class _TableScreenState extends State<TableScreen> {
                         child: Align(
                           alignment: Alignment.centerLeft,
                           child: Padding(
-                            padding: const EdgeInsets.only(left: 7),
-                            child: Text(
-                              '${r + 1}.\nSIRA',
-                              textAlign: TextAlign.center,
-                              style: TextStyle(
-                                color: const Color(0xFFD4AF37)
-                                    .withValues(alpha: 0.45),
-                                fontWeight: FontWeight.w900,
-                                fontSize: 8.5,
-                              ),
+                            padding: const EdgeInsets.only(left: 6),
+                            child: Icon(
+                              Icons.drag_indicator_rounded,
+                              color: const Color(0xFFD4AF37).withValues(alpha: 0.30),
+                              size: 14,
                             ),
                           ),
                         ),

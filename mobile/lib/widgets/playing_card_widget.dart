@@ -364,15 +364,110 @@ class PlayingCardWidget extends StatelessWidget {
       );
     }
 
-    // 2..10 sayı kağıtları için ferah, göz yormayan klasik merkez sembolü
-    return Text(
-      card.suitSymbol,
-      style: TextStyle(
-        color: suitColor.withValues(alpha: 0.88),
-        fontSize: (centerArtSize * 0.75).clamp(13.0, 22.0),
-        height: 1.0,
-      ),
+    // 2..10 sayı kağıtları için gerçekçi iskambil pip (nokta) simetrik dizilimi
+    return _buildMultiPipLayout(
+      rank: card.rank,
+      suitSymbol: card.suitSymbol,
+      suitColor: suitColor,
+      centerArtSize: centerArtSize,
     );
+  }
+
+  /// 2..10 arası kağıtlar için klasik iskambil destesi pip desen dağılımı
+  Widget _buildMultiPipLayout({
+    required int rank,
+    required String suitSymbol,
+    required Color suitColor,
+    required double centerArtSize,
+  }) {
+    final double pipSize = (centerArtSize * 0.40).clamp(7.5, 12.0);
+    final pipStyle = TextStyle(
+      color: suitColor.withValues(alpha: 0.90),
+      fontSize: pipSize,
+      height: 1.0,
+      fontWeight: FontWeight.bold,
+    );
+
+    final pip = Text(suitSymbol, style: pipStyle);
+    final invPip = Transform.rotate(angle: math.pi, child: pip);
+
+    if (rank == 2) {
+      return Column(
+        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+        children: [pip, invPip],
+      );
+    } else if (rank == 3) {
+      return Column(
+        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+        children: [pip, pip, invPip],
+      );
+    } else if (rank == 4) {
+      return Row(
+        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+        children: [
+          Column(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [pip, invPip]),
+          Column(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [pip, invPip]),
+        ],
+      );
+    } else if (rank == 5) {
+      return Row(
+        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+        children: [
+          Column(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [pip, invPip]),
+          Center(child: pip),
+          Column(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [pip, invPip]),
+        ],
+      );
+    } else if (rank == 6) {
+      return Row(
+        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+        children: [
+          Column(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [pip, pip, invPip]),
+          Column(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [pip, pip, invPip]),
+        ],
+      );
+    } else if (rank == 7) {
+      return Row(
+        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+        children: [
+          Column(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [pip, pip, invPip]),
+          Column(
+            mainAxisAlignment: MainAxisAlignment.start,
+            children: [const SizedBox(height: 6), pip],
+          ),
+          Column(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [pip, pip, invPip]),
+        ],
+      );
+    } else if (rank == 8) {
+      return Row(
+        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+        children: [
+          Column(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [pip, pip, invPip]),
+          Column(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [pip, invPip]),
+          Column(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [pip, pip, invPip]),
+        ],
+      );
+    } else if (rank == 9) {
+      return Row(
+        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+        children: [
+          Column(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [pip, pip, invPip, invPip]),
+          Center(child: pip),
+          Column(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [pip, pip, invPip, invPip]),
+        ],
+      );
+    } else if (rank == 10) {
+      return Row(
+        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+        children: [
+          Column(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [pip, pip, invPip, invPip]),
+          Column(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [pip, invPip]),
+          Column(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [pip, pip, invPip, invPip]),
+        ],
+      );
+    }
+
+    return pip;
   }
 }
 
