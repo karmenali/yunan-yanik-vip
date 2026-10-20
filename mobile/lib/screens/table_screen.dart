@@ -22,6 +22,9 @@ class _TableScreenState extends State<TableScreen> {
   String? _selectedCardId;
   String? _draggingCardId;
   Offset _dragLocalPos = Offset.zero;
+  Offset _dragGrabOffset = Offset.zero; // Kartın tutulduğu iç ofset (zıplamayı önler)
+  int _lastTargetSlotIndex = -1; // Titremeyi önleyen histerezis için son hedef slot
+  int _lastTargetRowIndex = -1;
 
   bool _showScoreboardModal = false;
   bool _showChatDrawer = false;
@@ -250,10 +253,13 @@ class _TableScreenState extends State<TableScreen> {
     final currentIds = _allLocalCards.map((c) => c.id).toSet();
     final serverIds = serverCards.map((c) => c.id).toSet();
 
-    // Kullanıcı şu anda parmağıyla kart sürüklüyorsa ve eldeki kart kümesi değişmediyse sırayı bozma
-    if (_draggingCardId != null &&
-        currentIds.length == serverIds.length &&
-        currentIds.containsAll(serverIds)) {
+    // B1 DÜZELTMESİ (İstikrarlı Istaka):
+    // Kullanıcının elindeki kart kümesi değişmediyse (yani yeni kart çekilmedi veya kart atılmadıysa),
+    // sunucudan gelen saniyelik sayaç (table_timer_tick), kredi güncellemeleri veya eski myHandRows
+    // kullanıcının yerel dizilimini ASLA EZEMEZ ve kartları geri zıplatamaz!
+    if (currentIds.length == serverIds.length &&
+        currentIds.containsAll(serverIds) &&
+        _allLocalCards.isNotEmpty) {
       return;
     }
 
@@ -261,23 +267,31 @@ class _TableScreenState extends State<TableScreen> {
     final seen = <String>{};
     final nextRows = <List<CardModel>>[[], [], []];
 
-    // Önce sunucudan gelen (veya yerel korunan) 3 sıra dizilimini uygula
-    final sourceRowIds = table.myHandRows.any((r) => r.isNotEmpty)
-        ? table.myHandRows
-        : _currentRowIds;
-
+    // Önce yerel sıralamayı korumaya çalış (kart kümesi değişmiş olsa bile mevcut sırayı sakla)
     for (int r = 0; r < 3; r++) {
-      final ids = r < sourceRowIds.length ? sourceRowIds[r] : <String>[];
-      for (final id in ids) {
-        final c = cardMap[id];
-        if (c != null && !seen.contains(id)) {
-          nextRows[r].add(c);
-          seen.add(id);
+      for (final c in _localRows[r]) {
+        if (serverIds.contains(c.id) && !seen.contains(c.id)) {
+          nextRows[r].add(cardMap[c.id] ?? c);
+          seen.add(c.id);
         }
       }
     }
 
-    // Henüz bir sıraya yerleşmemiş kağıtları (ör. yeni çekilen 11. kağıt) en uygun sıraya yerleştir
+    // Eğer el sıfırdan başlıyorsa veya yerelde hiç kart yoksa sunucunun ilk dizilimini al
+    if (seen.isEmpty && table.myHandRows.any((r) => r.isNotEmpty)) {
+      for (int r = 0; r < 3; r++) {
+        final ids = r < table.myHandRows.length ? table.myHandRows[r] : <String>[];
+        for (final id in ids) {
+          final c = cardMap[id];
+          if (c != null && !seen.contains(id)) {
+            nextRows[r].add(c);
+            seen.add(id);
+          }
+        }
+      }
+    }
+
+    // Yeni çekilen (henüz hiçbir sıraya girmemiş) kartı en uygun sıraya yerleştir
     for (final c in serverCards) {
       if (!seen.contains(c.id)) {
         int targetRow = 2;
@@ -2299,13 +2313,17 @@ class _TableScreenState extends State<TableScreen> {
           behavior: HitTestBehavior.translucent,
           onPanStart: (details) {
             final pos = details.localPosition;
-            final hit = _hitTestCardAtPosition(pos, maxW, rowH, cardW, cardH);
-            if (hit == null) return;
+            final hitResult = _hitTestCardWithOffset(pos, maxW, rowH, cardW, cardH);
+            if (hitResult == null) return;
 
             SoundFx.playCardTap();
+            HapticFeedback.selectionClick();
             setState(() {
-              _draggingCardId = hit.id;
+              _draggingCardId = hitResult.card.id;
+              _dragGrabOffset = hitResult.grabOffset;
               _dragLocalPos = pos;
+              _lastTargetRowIndex = hitResult.row;
+              _lastTargetSlotIndex = hitResult.index;
             });
           },
           onPanUpdate: (details) {
@@ -2315,7 +2333,7 @@ class _TableScreenState extends State<TableScreen> {
             _moveDraggedCardToRowSlot(
               _draggingCardId!,
               targetRow,
-              pos.dx,
+              pos.dx - _dragGrabOffset.dx,
               maxW,
               cardW,
             );
@@ -2328,12 +2346,23 @@ class _TableScreenState extends State<TableScreen> {
             if (_draggingCardId == null) return;
             setState(() {
               _draggingCardId = null;
+              _lastTargetRowIndex = -1;
+              _lastTargetSlotIndex = -1;
             });
 
             GameService.instance.reorderHand(
               orderedCardIds: _allLocalCards.map((c) => c.id).toList(),
               rowCardIds: _currentRowIds,
             );
+          },
+          onPanCancel: () {
+            if (_draggingCardId != null) {
+              setState(() {
+                _draggingCardId = null;
+                _lastTargetRowIndex = -1;
+                _lastTargetSlotIndex = -1;
+              });
+            }
           },
           child: SizedBox(
             width: maxW,
@@ -2391,7 +2420,7 @@ class _TableScreenState extends State<TableScreen> {
                     ),
                   ),
 
-                // HER SIRADAKİ KARTLARI YERLEŞTİR
+                // HER SIRADAKİ NORMAL KARTLARI YERLEŞTİR (Sürüklenen kart HARİÇ)
                 for (int r = 0; r < 3; r++)
                   ..._buildRowCardsWidgets(
                     rowIdx: r,
@@ -2405,6 +2434,18 @@ class _TableScreenState extends State<TableScreen> {
                     lastDrawnCardId: lastDrawnCardId,
                     isMyTurn: isMyTurn,
                     hasDrawn: hasDrawn,
+                    renderDraggingCard: false,
+                  ),
+
+                // SÜRÜKLENEN KARTI HER ZAMAN EN ÜSTTE ÇİZ (Z-Index / Diğer kartların altına girmez!)
+                if (_draggingCardId != null)
+                  _buildFloatingDraggedCard(
+                    maxW: maxW,
+                    rowH: rowH,
+                    cardW: cardW,
+                    cardH: cardH,
+                    table: table,
+                    meldedIds: meldedIds,
                   ),
               ],
             ),
@@ -2426,6 +2467,7 @@ class _TableScreenState extends State<TableScreen> {
     required String? lastDrawnCardId,
     required bool isMyTurn,
     required bool hasDrawn,
+    bool renderDraggingCard = true,
   }) {
     final count = rowCards.length;
     if (count == 0) return const [];
@@ -2441,56 +2483,120 @@ class _TableScreenState extends State<TableScreen> {
         leftPadding + ((usableW - totalRowW) / 2).clamp(0.0, usableW);
     final double baseTop = rowIdx * rowH + (rowH - cardH) / 2;
 
-    return List.generate(count, (idx) {
+    final widgets = <Widget>[];
+
+    for (int idx = 0; idx < count; idx++) {
       final card = rowCards[idx];
       final cardId = card.id;
       final isDragging = _draggingCardId == cardId;
+
+      // Sürüklenen kart ayrı olarak en üstte render edilecekse bu sırada çizme
+      if (isDragging && !renderDraggingCard) {
+        continue;
+      }
+
       final isSelected = _selectedCardId == cardId;
       final isMelded = meldedIds.contains(cardId);
       final isNewlyDrawn = lastDrawnCardId == cardId;
       final isWinningDiscard =
           table.isAssisted && table.winningDiscardCardId == cardId;
 
-      final double left = isDragging
-          ? (_dragLocalPos.dx - cardW / 2).clamp(4.0, maxW - cardW - 4.0)
-          : startX + idx * stepX;
-      final double top = isDragging
-          ? (_dragLocalPos.dy - cardH / 2).clamp(-40.0, rowH * 3 - cardH)
-          : baseTop - (isSelected ? 8.0 : 0.0);
+      final double left = startX + idx * stepX;
+      final double top = baseTop - (isSelected ? 8.0 : 0.0);
 
-      return AnimatedPositioned(
-        key: ValueKey(cardId),
-        duration: Duration(milliseconds: isDragging ? 0 : 120),
-        curve: Curves.easeOutCubic,
-        left: left,
-        top: top,
-        child: GestureDetector(
-          onTap: () {
-            SoundFx.playCardTap();
-            setState(() {
-              _selectedCardId = (_selectedCardId == cardId) ? null : cardId;
-            });
-          },
-          child: Transform.scale(
-            scale: isDragging ? 1.06 : 1.0,
-            child: PlayingCardWidget(
-              card: card,
-              wildRank: table.wildRank,
-              showWildHints: table.isAssisted,
-              width: cardW,
-              height: cardH,
-              isSelected: isSelected,
-              isMelded: isMelded,
-              isNewlyDrawn: isNewlyDrawn,
-              isWinningDiscardCandidate: isWinningDiscard,
+      widgets.add(
+        AnimatedPositioned(
+          key: ValueKey(cardId),
+          duration: const Duration(milliseconds: 140),
+          curve: Curves.easeOutCubic,
+          left: left,
+          top: top,
+          child: RepaintBoundary(
+            child: GestureDetector(
+              onTap: () {
+                SoundFx.playCardTap();
+                setState(() {
+                  _selectedCardId = (_selectedCardId == cardId) ? null : cardId;
+                });
+              },
+              child: PlayingCardWidget(
+                card: card,
+                wildRank: table.wildRank,
+                showWildHints: table.isAssisted,
+                width: cardW,
+                height: cardH,
+                isSelected: isSelected,
+                isMelded: isMelded,
+                isNewlyDrawn: isNewlyDrawn,
+                isWinningDiscardCandidate: isWinningDiscard,
+              ),
             ),
           ),
         ),
       );
-    });
+    }
+
+    return widgets;
   }
 
-  CardModel? _hitTestCardAtPosition(
+  /// Sürüklenen kartı Stack'in en tepesinde, parmağın tuttuğu ofseti koruyarak ve hafif tilt/gölge efektiyle çizer
+  Widget _buildFloatingDraggedCard({
+    required double maxW,
+    required double rowH,
+    required double cardW,
+    required double cardH,
+    required TableStateModel table,
+    required Set<String> meldedIds,
+  }) {
+    final draggingCard = _allLocalCards
+        .cast<CardModel?>()
+        .firstWhere((c) => c?.id == _draggingCardId, orElse: () => null);
+    if (draggingCard == null) return const SizedBox.shrink();
+
+    // Tutma ofsetini koru: kart parmağın tam dokunulduğu yerinde kalsın, merkeze zıplamasın!
+    final double left = (_dragLocalPos.dx - _dragGrabOffset.dx)
+        .clamp(4.0, maxW - cardW - 4.0);
+    final double top = (_dragLocalPos.dy - _dragGrabOffset.dy)
+        .clamp(-30.0, rowH * 3 - cardH + 10.0);
+
+    return Positioned(
+      key: ValueKey('floating_${draggingCard.id}'),
+      left: left,
+      top: top,
+      child: IgnorePointer(
+        child: Transform.rotate(
+          angle: -0.05, // Hafif doğal kaldırma eğimi (tilt)
+          child: Transform.scale(
+            scale: 1.08, // Havaya kalkma hissi
+            child: Container(
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(10),
+                boxShadow: const [
+                  BoxShadow(
+                    color: Colors.black54,
+                    blurRadius: 18,
+                    offset: Offset(0, 8),
+                  ),
+                ],
+              ),
+              child: PlayingCardWidget(
+                card: draggingCard,
+                wildRank: table.wildRank,
+                showWildHints: table.isAssisted,
+                width: cardW,
+                height: cardH,
+                isSelected: true,
+                isMelded: meldedIds.contains(draggingCard.id),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Parmak dokunuşunun hangi karta denk geldiğini ve kartın içindeki tutuş ofsetini (`grabOffset`) belirler
+  _HitCardResult? _hitTestCardWithOffset(
     Offset pos,
     double maxW,
     double rowH,
@@ -2511,24 +2617,33 @@ class _TableScreenState extends State<TableScreen> {
     final double totalRowW = cardW + stepX * (count - 1);
     final double startX =
         leftPadding + ((usableW - totalRowW) / 2).clamp(0.0, usableW);
+    final double baseTop = r * rowH + (rowH - cardH) / 2;
 
+    // Sağdan sola kontrol et (en üstte görünen kart önceliklidir)
     for (int i = count - 1; i >= 0; i--) {
       final left = startX + i * stepX;
-      if (pos.dx >= left && pos.dx <= left + cardW) {
-        return rowCards[i];
+      // Dikey ve yatay tam kart sınırları içinde mi?
+      if (pos.dx >= left && pos.dx <= left + cardW &&
+          pos.dy >= baseTop - 10 && pos.dy <= baseTop + cardH + 10) {
+        return _HitCardResult(
+          card: rowCards[i],
+          row: r,
+          index: i,
+          grabOffset: Offset(pos.dx - left, pos.dy - baseTop),
+        );
       }
     }
 
-    final approxIdx = stepX > 0
-        ? ((pos.dx - startX) / stepX).round().clamp(0, count - 1)
-        : 0;
-    return rowCards[approxIdx];
+    // Kart sınırları dışındaki rastgele boşluklara tıklandıysa boş dön (yanlış kart tutulmasını önler!)
+    return null;
   }
 
+  /// B2 DÜZELTMESİ (Histerezis & Kararlı Yuva Geçişi):
+  /// Parmak 1 piksel kaysa bile kartların ileri-geri titremesini engeller.
   void _moveDraggedCardToRowSlot(
     String cardId,
     int targetRow,
-    double fingerX,
+    double cardLeftX,
     double maxW,
     double cardW,
   ) {
@@ -2560,16 +2675,30 @@ class _TableScreenState extends State<TableScreen> {
     final double startX =
         leftPadding + ((usableW - totalRowW) / 2).clamp(0.0, usableW);
 
-    final int targetIdx = stepX > 0
-        ? ((fingerX - startX - cardW * 0.35) / stepX)
-            .round()
-            .clamp(0, countAfter - 1)
-        : 0;
+    int candidateIdx = 0;
+    if (stepX > 0) {
+      final double cardCenterX = cardLeftX + cardW / 2;
+      candidateIdx = ((cardCenterX - startX) / stepX)
+          .round()
+          .clamp(0, countAfter - 1);
+    }
 
-    if (fromRow == targetRow && fromIdx == targetIdx) return;
+    // Histerezis Kontrolü: Eğer aynı sıradaysak ve slot gerçekten değişmediyse yer değiştirme yapma!
+    if (fromRow == targetRow && candidateIdx == fromIdx) {
+      _lastTargetRowIndex = targetRow;
+      _lastTargetSlotIndex = candidateIdx;
+      return;
+    }
+
+    if (_lastTargetRowIndex == targetRow && _lastTargetSlotIndex == candidateIdx) {
+      return;
+    }
+
+    _lastTargetRowIndex = targetRow;
+    _lastTargetSlotIndex = candidateIdx;
 
     _localRows[fromRow].removeAt(fromIdx);
-    final clampedInsert = targetIdx.clamp(0, _localRows[targetRow].length);
+    final clampedInsert = candidateIdx.clamp(0, _localRows[targetRow].length);
     _localRows[targetRow].insert(clampedInsert, movingCard);
     HapticFeedback.selectionClick();
   }
@@ -4067,4 +4196,18 @@ class _TableScreenState extends State<TableScreen> {
       ),
     );
   }
+}
+
+class _HitCardResult {
+  final CardModel card;
+  final int row;
+  final int index;
+  final Offset grabOffset;
+
+  _HitCardResult({
+    required this.card,
+    required this.row,
+    required this.index,
+    required this.grabOffset,
+  });
 }
