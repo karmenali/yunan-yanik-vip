@@ -1570,14 +1570,17 @@ export class TableManager {
     if (!isSingleSurvivorGameWin) {
       for (const seat of table.seats) {
         if (!seat || !seat.isBot) continue;
-        const botDelayMs = 2500 + Math.floor(Math.random() * 2000);
+        const botDelayMs = 1200 + Math.floor(Math.random() * 1000);
         setTimeout(() => {
           this.enqueueTableAction(table.id, async () => {
             if (table.status !== 'round_summary') return;
-            if (seat.isEliminated && seat.awaitingRebuyDecision && seat.rebuyCount < 2) {
-              await this.rebuyIntoMatch(seat.userId, table.id).catch(() => {});
-            } else if (!seat.isEliminated && !seat.votedContinue) {
-              await this.voteContinue(seat.userId, table.id);
+            const currentSeat = table.seats.find((s) => s?.userId === seat.userId);
+            if (!currentSeat || !currentSeat.isBot) return;
+
+            if (currentSeat.isEliminated && currentSeat.awaitingRebuyDecision && currentSeat.rebuyCount < 2) {
+              await this.rebuyIntoMatch(currentSeat.userId, table.id).catch(() => {});
+            } else if (!currentSeat.isEliminated && !currentSeat.votedContinue) {
+              await this.voteContinue(currentSeat.userId, table.id);
             }
           });
         }, botDelayMs);
@@ -1744,12 +1747,15 @@ export class TableManager {
 
       this.broadcastTableState(table.id);
 
-      // Tüm hayatta olan oyuncular (veya re-buy beklemeyenler) "Devam Et" dediyse süreyi beklemeden hemen başlat
-      const activeSeats = table.seats.filter(
+      // Tüm hayatta olan oyuncular "Devam Et" dediyse veya elenip re-buy kararı verenler bittiyse süreyi beklemeden hemen başlat
+      const eligibleSeats = table.seats.filter(
         (s): s is SeatPlayer => s !== null && (!s.isEliminated || s.awaitingRebuyDecision)
       );
-      const allDone = activeSeats.every((s) => !s.isEliminated && s.votedContinue);
-      if (allDone && activeSeats.length >= 2) {
+      const allDone = eligibleSeats.every((s) => !s.isEliminated && s.votedContinue);
+      if (allDone && eligibleSeats.length >= 2) {
+        if (table.phaseTimer) clearTimeout(table.phaseTimer);
+        this.proceedAfterRoundSummary(table);
+      } else if (eligibleSeats.length <= 1) {
         if (table.phaseTimer) clearTimeout(table.phaseTimer);
         this.proceedAfterRoundSummary(table);
       }

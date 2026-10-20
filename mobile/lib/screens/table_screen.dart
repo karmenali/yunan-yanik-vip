@@ -25,6 +25,8 @@ class _TableScreenState extends State<TableScreen> {
   Offset _dragGrabOffset = Offset.zero; // Kartın tutulduğu iç ofset (zıplamayı önler)
   int _lastTargetSlotIndex = -1; // Titremeyi önleyen histerezis için son hedef slot
   int _lastTargetRowIndex = -1;
+  bool _forceSyncRowsNextUpdate = false; // Otomatik per dizildiğinde sunucu dizilimini kabul et bayrağı
+  bool _localVotedContinue = false; // Tur sonunda kullanıcı Devam Et butonuna bastığında anında tepki vermesi için
 
   bool _showScoreboardModal = false;
   bool _showChatDrawer = false;
@@ -126,6 +128,9 @@ class _TableScreenState extends State<TableScreen> {
       if (!mounted) return;
       final type = anim['type']?.toString();
       if (type == 'round_started') {
+        setState(() {
+          _localVotedContinue = false;
+        });
         _startRealisticDealingAnimation();
       } else if (type == 'draw' || type == 'discard') {
         setState(() => _activeFlyingCardAnim = anim);
@@ -257,11 +262,14 @@ class _TableScreenState extends State<TableScreen> {
     // Kullanıcının elindeki kart kümesi değişmediyse (yani yeni kart çekilmedi veya kart atılmadıysa),
     // sunucudan gelen saniyelik sayaç (table_timer_tick), kredi güncellemeleri veya eski myHandRows
     // kullanıcının yerel dizilimini ASLA EZEMEZ ve kartları geri zıplatamaz!
-    if (currentIds.length == serverIds.length &&
+    // Ancak _forceSyncRowsNextUpdate true ise (örn: Otomatik Per Diz butonuna basıldığında) kabul et!
+    if (!_forceSyncRowsNextUpdate &&
+        currentIds.length == serverIds.length &&
         currentIds.containsAll(serverIds) &&
         _allLocalCards.isNotEmpty) {
       return;
     }
+    _forceSyncRowsNextUpdate = false;
 
     final cardMap = {for (final c in serverCards) c.id: c};
     final seen = <String>{};
@@ -557,6 +565,9 @@ class _TableScreenState extends State<TableScreen> {
     SoundFx.playCardTap();
     final gs = GameService.instance;
     if (table.isAssisted) {
+      setState(() {
+        _forceSyncRowsNextUpdate = true;
+      });
       gs.reorderHand();
       return;
     }
@@ -3283,11 +3294,14 @@ class _TableScreenState extends State<TableScreen> {
                 SizedBox(
                   width: double.infinity,
                   child: ElevatedButton.icon(
-                    onPressed: mySeat.votedContinue
+                    onPressed: (mySeat.votedContinue || _localVotedContinue)
                         ? null
-                        : () => gs.voteContinueRound(),
+                        : () {
+                            setState(() => _localVotedContinue = true);
+                            gs.voteContinueRound();
+                          },
                     style: ElevatedButton.styleFrom(
-                      backgroundColor: mySeat.votedContinue
+                      backgroundColor: (mySeat.votedContinue || _localVotedContinue)
                           ? const Color(0xFF065F46)
                           : const Color(0xFF10B981),
                       foregroundColor: Colors.white,
@@ -3297,7 +3311,7 @@ class _TableScreenState extends State<TableScreen> {
                       shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(14),
                         side: BorderSide(
-                          color: mySeat.votedContinue
+                          color: (mySeat.votedContinue || _localVotedContinue)
                               ? const Color(0xFF34D399)
                               : Colors.transparent,
                           width: 1.5,
@@ -3305,13 +3319,13 @@ class _TableScreenState extends State<TableScreen> {
                       ),
                     ),
                     icon: Icon(
-                      mySeat.votedContinue
+                      (mySeat.votedContinue || _localVotedContinue)
                           ? Icons.check_circle
                           : Icons.play_arrow_rounded,
                       size: 20,
                     ),
                     label: Text(
-                      mySeat.votedContinue
+                      (mySeat.votedContinue || _localVotedContinue)
                           ? 'DEVAM OYU VERİLDİ (Diğerleri Bekleniyor...)'
                           : 'DEVAM ET (${table.turnRemainingSeconds}s İçinde Basınız)',
                       style: const TextStyle(
@@ -3689,11 +3703,16 @@ class _TableScreenState extends State<TableScreen> {
                     SizedBox(
                       width: double.infinity,
                       child: ElevatedButton.icon(
-                        onPressed: mySeat.votedContinue
+                        onPressed: (mySeat.votedContinue || _localVotedContinue)
                             ? null
-                            : () => gs.voteContinueRound(),
+                            : () {
+                                setState(() => _localVotedContinue = true);
+                                gs.voteContinueRound();
+                              },
                         style: ElevatedButton.styleFrom(
-                          backgroundColor: const Color(0xFF059669),
+                          backgroundColor: (mySeat.votedContinue || _localVotedContinue)
+                              ? const Color(0xFF065F46)
+                              : const Color(0xFF059669),
                           foregroundColor: Colors.white,
                           disabledBackgroundColor: const Color(0xFF065F46),
                           disabledForegroundColor: Colors.white70,
@@ -3703,13 +3722,13 @@ class _TableScreenState extends State<TableScreen> {
                           ),
                         ),
                         icon: Icon(
-                          mySeat.votedContinue
+                          (mySeat.votedContinue || _localVotedContinue)
                               ? Icons.check_circle
                               : Icons.play_arrow_rounded,
                           size: 18,
                         ),
                         label: Text(
-                          mySeat.votedContinue
+                          (mySeat.votedContinue || _localVotedContinue)
                               ? 'DEVAM OYU VERİLDİ'
                               : 'DEVAM ET (${table.turnRemainingSeconds}s)',
                           style: const TextStyle(fontWeight: FontWeight.w900),
