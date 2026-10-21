@@ -1,8 +1,8 @@
-import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import '../models/game_models.dart';
+import 'vector_card_renderer.dart';
 
-/// Zynga Poker / Bicycle Casino Standartlarında Temiz, Okunaklı İskambil Kağıdı Bileşeni
+/// Zynga Poker / Bicycle Casino Standartlarında Vektörel İskambil Kağıdı Bileşeni
 class PlayingCardWidget extends StatelessWidget {
   final CardModel card;
   final int wildRank;
@@ -38,436 +38,133 @@ class PlayingCardWidget extends StatelessWidget {
         showWildHints && !isPhysicalJoker && wildRank > 0 && card.rank == wildRank;
     final bool showAsWild = isPhysicalJoker || isIndicatorWild;
 
-    final Color suitColor = isPhysicalJoker
-        ? const Color(0xFF6D28D9)
-        : (card.suit == 'hearts' || card.suit == 'diamonds')
-            ? const Color(0xFFDC2626)
-            : const Color(0xFF111827);
-
-    // Çerçeve rengi ve kalınlığı
-    Color borderColor = const Color(0xFFD6D3C9);
-    double borderWidth = 1.1;
-
-    if (isSelected) {
-      borderColor = const Color(0xFFF59E0B);
-      borderWidth = 2.2;
-    } else if (isWinningDiscardCandidate) {
-      borderColor = const Color(0xFFEF4444);
-      borderWidth = 2.0;
-    } else if (isMelded) {
-      borderColor = const Color(0xFF10B981);
-      borderWidth = 1.9;
-    } else if (isIndicatorWild) {
-      borderColor = const Color(0xFFD97706);
-      borderWidth = 1.6;
-    } else if (isNewlyDrawn) {
-      borderColor = const Color(0xFF38BDF8);
-      borderWidth = 1.7;
+    String normalizedSuit = card.suit.toUpperCase();
+    if (normalizedSuit.startsWith('SPADE')) {
+      normalizedSuit = 'S';
+    } else if (normalizedSuit.startsWith('HEART')) {
+      normalizedSuit = 'H';
+    } else if (normalizedSuit.startsWith('DIAMOND')) {
+      normalizedSuit = 'D';
+    } else if (normalizedSuit.startsWith('CLUB')) {
+      normalizedSuit = 'C';
+    } else if (normalizedSuit.isNotEmpty) {
+      normalizedSuit = normalizedSuit[0];
+    } else {
+      normalizedSuit = 'S';
     }
 
-    final double radius = (width * 0.13).clamp(6.0, 11.0);
-    final double rankFontSize = (width * 0.22).clamp(9.0, 15.0);
-    final double cornerSuitSize = (width * 0.14).clamp(6.5, 10.5);
-    final double centerArtSize = (width * 0.34).clamp(13.0, 22.0);
-
-    final Widget cardBody = Container(
+    final cardBody = SizedBox(
       width: width,
       height: height,
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(radius),
-        gradient: LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: isSelected
-              ? const [Color(0xFFFFFBEB), Color(0xFFFEF3C7)]
-              : isPhysicalJoker
-                  ? const [Color(0xFFFAF5FF), Color(0xFFF3E8FF)]
-                  : isIndicatorWild
-                      ? const [Color(0xFFFFFBEB), Color(0xFFFEF9C3)]
-                      : const [Color(0xFFFCFBF9), Color(0xFFF4F1EA)],
-        ),
-        border: Border.all(color: borderColor, width: borderWidth),
-        boxShadow: [
-          BoxShadow(
-            color: isSelected
-                ? const Color(0xFFF59E0B).withValues(alpha: 0.42)
-                : isMelded
-                    ? const Color(0xFF10B981).withValues(alpha: 0.25)
-                    : Colors.black.withValues(alpha: 0.36),
-            blurRadius: isSelected ? 8 : 4,
-            offset: Offset(0, isSelected ? 3 : 2),
+      child: Stack(
+        children: [
+          // 1. GPU Hızlandırmalı Kusursuz Vektörel Kart Gövdesi (Zynga / Batak HD Standartı)
+          Positioned.fill(
+            child: CustomPaint(
+              size: Size(width, height),
+              painter: VectorCardPainter(
+                rank: card.rank,
+                suit: normalizedSuit,
+                isPhysicalJoker: isPhysicalJoker,
+                showAsWild: showAsWild,
+                isSelected: isSelected,
+                isWinningDiscardCandidate: isWinningDiscardCandidate,
+              ),
+            ),
           ),
-        ],
-      ),
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(radius - 1),
-        child: Stack(
-          children: [
-            // İnce klasik iç çerçeve
+
+          // 2. Yeni Çekilen Kağıt Mavi Vurgusu
+          if (isNewlyDrawn)
             Positioned.fill(
-              child: Padding(
-                padding: EdgeInsets.all((width * 0.055).clamp(2.5, 4.5)),
-                child: DecoratedBox(
+              child: IgnorePointer(
+                child: Container(
                   decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular((radius - 3).clamp(3.0, 8.0)),
-                    border: Border.all(
-                      color: suitColor.withValues(alpha: 0.08),
-                      width: 0.8,
-                    ),
+                    borderRadius: BorderRadius.circular((width * 0.12).clamp(5.0, 10.0)),
+                    border: Border.all(color: const Color(0xFF38BDF8), width: 2.0),
                   ),
                 ),
               ),
             ),
 
-            // SOL ÜST KÖŞE İNDEKSİ (Sayı + Sembol)
+          // 3. Yardımlı Modda Per Onay Noktası (Sağ üst yeşil nokta)
+          if (isMelded && !showAsWild)
             Positioned(
-              top: (height * 0.050).clamp(2.5, 5.0),
-              left: (width * 0.080).clamp(3.0, 6.0),
-              child: _buildCornerIndex(
-                isPhysicalJoker: isPhysicalJoker,
-                suitColor: suitColor,
-                rankFontSize: rankFontSize,
-                cornerSuitSize: cornerSuitSize,
-              ),
-            ),
-
-            // SAĞ ALT KÖŞE TERS İNDEKS (Gerçek İskambil Kağıdı Simetrisi)
-            if (height >= 60)
-              Positioned(
-                bottom: (height * 0.050).clamp(2.5, 5.0),
-                right: (width * 0.080).clamp(3.0, 6.0),
-                child: Transform.rotate(
-                  angle: math.pi,
-                  child: _buildCornerIndex(
-                    isPhysicalJoker: isPhysicalJoker,
-                    suitColor: suitColor,
-                    rankFontSize: rankFontSize * 0.90,
-                    cornerSuitSize: cornerSuitSize * 0.90,
-                  ),
-                ),
-              ),
-
-            // ORTA İSKAMBİL SANATI (A, J/Q/K, Sayı veya Joker)
-            // Tam matematiksel merkezde konumlandırıldı
-            Align(
-              alignment: Alignment.center,
-              child: _buildCenterCardArt(
-                isPhysicalJoker: isPhysicalJoker,
-                suitColor: suitColor,
-                centerArtSize: centerArtSize,
-              ),
-            ),
-
-
-            // YARDIMLI MODDA PER ONAY NOKTASI
-            if (isMelded && !showAsWild)
-              Positioned(
-                top: 4,
-                right: 4,
+              top: 3.5,
+              right: 3.5,
+              child: IgnorePointer(
                 child: Container(
                   width: (width * 0.13).clamp(6.0, 9.0),
                   height: (width * 0.13).clamp(6.0, 9.0),
                   decoration: const BoxDecoration(
                     color: Color(0xFF10B981),
                     shape: BoxShape.circle,
-                  ),
-                ),
-              ),
-
-            // YARDIMLI MODDA "BU KAĞIDI ATARSAN BİTERSİN" İŞARETİ
-            if (isWinningDiscardCandidate)
-              Positioned(
-                bottom: 3,
-                left: 0,
-                right: 0,
-                child: Center(
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFFEF4444),
-                      borderRadius: BorderRadius.circular(4),
-                    ),
-                    child: Text(
-                      'AT & AÇ',
-                      style: TextStyle(
-                        color: Colors.white,
-                        fontSize: (width * 0.12).clamp(6.5, 8.5),
-                        fontWeight: FontWeight.w900,
-                        height: 1.1,
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black26,
+                        blurRadius: 2,
+                        offset: Offset(0, 1),
                       ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+
+          // 4. Yardımlı Modda Joker Yıldız İpucu (Sağ üst altın yıldız)
+          if (isIndicatorWild)
+            Positioned(
+              top: 2,
+              right: 3,
+              child: IgnorePointer(
+                child: Text(
+                  '★',
+                  style: TextStyle(
+                    color: const Color(0xFFD97706),
+                    fontSize: (width * 0.15).clamp(8.0, 12.0),
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+            ),
+
+          // 5. Yardımlı Modda "AT & AÇ" Rozeti (Kullanıcı bu kağıdı atarsa açabilecekse)
+          if (isWinningDiscardCandidate)
+            Positioned(
+              bottom: 3,
+              left: 2,
+              right: 2,
+              child: Center(
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFEF4444),
+                    borderRadius: BorderRadius.circular(4),
+                    boxShadow: const [
+                      BoxShadow(
+                        color: Colors.black38,
+                        blurRadius: 2,
+                        offset: Offset(0, 1),
+                      ),
+                    ],
+                  ),
+                  child: Text(
+                    'AT & AÇ',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: (width * 0.12).clamp(6.5, 8.5),
+                      fontWeight: FontWeight.w900,
+                      height: 1.1,
                     ),
                   ),
                 ),
               ),
-          ],
-        ),
+            ),
+        ],
       ),
     );
 
     if (onTap == null) return cardBody;
     return GestureDetector(onTap: onTap, child: cardBody);
-  }
-
-  Widget _buildCornerIndex({
-    required bool isPhysicalJoker,
-    required Color suitColor,
-    required double rankFontSize,
-    required double cornerSuitSize,
-  }) {
-    if (isPhysicalJoker) {
-      final double jokerLetterSize = (width * 0.125).clamp(5.8, 8.8);
-      return Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Text(
-            '★',
-            style: TextStyle(
-              color: const Color(0xFFD97706),
-              fontSize: jokerLetterSize * 1.15,
-              fontWeight: FontWeight.w900,
-              height: 0.9,
-            ),
-          ),
-          Text(
-            'J\nO\nK\nE\nR',
-            textAlign: TextAlign.center,
-            style: TextStyle(
-              color: const Color(0xFFB91C1C),
-              fontSize: jokerLetterSize,
-              fontWeight: FontWeight.w900,
-              height: 0.92,
-            ),
-          ),
-        ],
-      );
-    }
-
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.center,
-      children: [
-        Text(
-          card.rankLabel,
-          style: TextStyle(
-            color: suitColor,
-            fontSize: rankFontSize,
-            fontWeight: FontWeight.w900,
-            letterSpacing: card.rank == 10 ? -0.8 : -0.2,
-            height: 1.0,
-          ),
-        ),
-        SizedBox(height: (height * 0.015).clamp(1.0, 2.0)),
-        Text(
-          card.suitSymbol,
-          style: TextStyle(
-            color: suitColor,
-            fontSize: cornerSuitSize,
-            fontWeight: FontWeight.bold,
-            height: 1.0,
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildCenterCardArt({
-    required bool isPhysicalJoker,
-    required Color suitColor,
-    required double centerArtSize,
-  }) {
-    if (isPhysicalJoker) {
-      return SizedBox(
-        width: width * 0.66,
-        height: height * 0.72,
-        child: ClipRRect(
-          borderRadius: BorderRadius.circular(5),
-          child: Image.asset(
-            'assets/images/joker_art.jpg',
-            fit: BoxFit.contain,
-          ),
-        ),
-      );
-    }
-
-    // Kraliyet kağıtları (J, Q, K) için gerçekçi, şık casino madalyonu
-    if (card.rank >= 11 && card.rank <= 13) {
-      final String courtLetter = card.rankLabel; // "J", "Q", "K"
-      return Container(
-        width: (centerArtSize * 0.95).clamp(16.0, 26.0),
-        height: (centerArtSize * 1.30).clamp(22.0, 36.0),
-        decoration: BoxDecoration(
-          color: suitColor.withValues(alpha: 0.04),
-          borderRadius: BorderRadius.circular(5),
-          border: Border.all(
-            color: const Color(0xFFD4AF37).withValues(alpha: 0.65),
-            width: 1.0,
-          ),
-        ),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Text(
-              card.suitSymbol,
-              style: TextStyle(
-                color: suitColor,
-                fontSize: (centerArtSize * 0.30).clamp(6.0, 10.0),
-                height: 1.0,
-              ),
-            ),
-            const SizedBox(height: 1),
-            Text(
-              courtLetter,
-              style: TextStyle(
-                color: suitColor,
-                fontSize: (centerArtSize * 0.52).clamp(10.0, 16.0),
-                fontWeight: FontWeight.w900,
-                height: 1.0,
-              ),
-            ),
-            const SizedBox(height: 1),
-            Text(
-              card.suitSymbol,
-              style: TextStyle(
-                color: suitColor,
-                fontSize: (centerArtSize * 0.30).clamp(6.0, 10.0),
-                height: 1.0,
-              ),
-            ),
-          ],
-        ),
-      );
-    }
-
-    // As (A) için özel rozetli büyük sembol
-    if (card.rank == 1) {
-      return Container(
-        width: (centerArtSize * 1.10).clamp(18.0, 30.0),
-        height: (centerArtSize * 1.10).clamp(18.0, 30.0),
-        decoration: BoxDecoration(
-          shape: BoxShape.circle,
-          color: suitColor.withValues(alpha: 0.06),
-          border: Border.all(
-            color: suitColor.withValues(alpha: 0.22),
-            width: 1.0,
-          ),
-        ),
-        child: Center(
-          child: Text(
-            card.suitSymbol,
-            style: TextStyle(
-              color: suitColor,
-              fontSize: (centerArtSize * 0.72).clamp(13.0, 22.0),
-              height: 1.0,
-            ),
-          ),
-        ),
-      );
-    }
-
-    // 2..10 sayı kağıtları için gerçekçi iskambil pip (nokta) simetrik dizilimi
-    return _buildMultiPipLayout(
-      rank: card.rank,
-      suitSymbol: card.suitSymbol,
-      suitColor: suitColor,
-      centerArtSize: centerArtSize,
-    );
-  }
-
-  /// 2..10 arası kağıtlar için klasik iskambil destesi pip desen dağılımı
-  Widget _buildMultiPipLayout({
-    required int rank,
-    required String suitSymbol,
-    required Color suitColor,
-    required double centerArtSize,
-  }) {
-    final double pipSize = (centerArtSize * 0.40).clamp(7.5, 12.0);
-    final pipStyle = TextStyle(
-      color: suitColor.withValues(alpha: 0.90),
-      fontSize: pipSize,
-      height: 1.0,
-      fontWeight: FontWeight.bold,
-    );
-
-    final pip = Text(suitSymbol, style: pipStyle);
-    final invPip = Transform.rotate(angle: math.pi, child: pip);
-
-    if (rank == 2) {
-      return Column(
-        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-        children: [pip, invPip],
-      );
-    } else if (rank == 3) {
-      return Column(
-        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-        children: [pip, pip, invPip],
-      );
-    } else if (rank == 4) {
-      return Row(
-        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-        children: [
-          Column(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [pip, invPip]),
-          Column(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [pip, invPip]),
-        ],
-      );
-    } else if (rank == 5) {
-      return Row(
-        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-        children: [
-          Column(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [pip, invPip]),
-          Center(child: pip),
-          Column(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [pip, invPip]),
-        ],
-      );
-    } else if (rank == 6) {
-      return Row(
-        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-        children: [
-          Column(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [pip, pip, invPip]),
-          Column(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [pip, pip, invPip]),
-        ],
-      );
-    } else if (rank == 7) {
-      return Row(
-        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-        children: [
-          Column(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [pip, pip, invPip]),
-          Column(
-            mainAxisAlignment: MainAxisAlignment.start,
-            children: [const SizedBox(height: 6), pip],
-          ),
-          Column(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [pip, pip, invPip]),
-        ],
-      );
-    } else if (rank == 8) {
-      return Row(
-        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-        children: [
-          Column(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [pip, pip, invPip]),
-          Column(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [pip, invPip]),
-          Column(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [pip, pip, invPip]),
-        ],
-      );
-    } else if (rank == 9) {
-      return Row(
-        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-        children: [
-          Column(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [pip, pip, invPip, invPip]),
-          Center(child: pip),
-          Column(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [pip, pip, invPip, invPip]),
-        ],
-      );
-    } else if (rank == 10) {
-      return Row(
-        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-        children: [
-          Column(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [pip, pip, invPip, invPip]),
-          Column(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [pip, invPip]),
-          Column(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [pip, pip, invPip, invPip]),
-        ],
-      );
-    }
-
-    return pip;
   }
 }
 
