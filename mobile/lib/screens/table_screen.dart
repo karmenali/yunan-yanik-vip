@@ -54,6 +54,8 @@ class _TableScreenState extends State<TableScreen> {
   final List<Map<String, dynamic>> _floatingEffects = [];
   final Map<String, String> _seatSpeechBubbles = {}; // userId -> son mesaj
   Map<String, dynamic>? _activeFlyingCardAnim;
+  String? _pendingDiscardCardId;
+  String? _pendingDrawCardId;
 
   StreamSubscription<String>? _toastSub;
   StreamSubscription<Map<String, dynamic>>? _effectSub;
@@ -133,10 +135,20 @@ class _TableScreenState extends State<TableScreen> {
         });
         _startRealisticDealingAnimation();
       } else if (type == 'draw' || type == 'discard') {
+        final cardId = anim['card']?['id']?.toString();
+        if (type == 'draw' && cardId != null) {
+          _pendingDrawCardId = cardId;
+        }
         setState(() => _activeFlyingCardAnim = anim);
-        Future.delayed(const Duration(milliseconds: 420), () {
-          if (mounted && _activeFlyingCardAnim == anim) {
-            setState(() => _activeFlyingCardAnim = null);
+        Future.delayed(const Duration(milliseconds: 380), () {
+          if (mounted) {
+            setState(() {
+              if (_activeFlyingCardAnim == anim) {
+                _activeFlyingCardAnim = null;
+              }
+              _pendingDrawCardId = null;
+              _syncLocalRowsFromServer();
+            });
           }
         });
       } else if (type == 'round_ended') {
@@ -258,6 +270,11 @@ class _TableScreenState extends State<TableScreen> {
     final currentIds = _allLocalCards.map((c) => c.id).toSet();
     final serverIds = serverCards.map((c) => c.id).toSet();
 
+    // Atılan kart sunucudan düştüyse pending durumunu temizle
+    if (_pendingDiscardCardId != null && !serverIds.contains(_pendingDiscardCardId)) {
+      _pendingDiscardCardId = null;
+    }
+
     // B1 DÜZELTMESİ (İstikrarlı Istaka):
     // Kullanıcının elindeki kart kümesi değişmediyse (yani yeni kart çekilmedi veya kart atılmadıysa),
     // sunucudan gelen saniyelik sayaç (table_timer_tick), kredi güncellemeleri veya eski myHandRows
@@ -278,6 +295,7 @@ class _TableScreenState extends State<TableScreen> {
     // Önce yerel sıralamayı korumaya çalış (kart kümesi değişmiş olsa bile mevcut sırayı sakla)
     for (int r = 0; r < 3; r++) {
       for (final c in _localRows[r]) {
+        if (c.id == _pendingDiscardCardId) continue;
         if (serverIds.contains(c.id) && !seen.contains(c.id)) {
           nextRows[r].add(cardMap[c.id] ?? c);
           seen.add(c.id);
@@ -290,6 +308,7 @@ class _TableScreenState extends State<TableScreen> {
       for (int r = 0; r < 3; r++) {
         final ids = r < table.myHandRows.length ? table.myHandRows[r] : <String>[];
         for (final id in ids) {
+          if (id == _pendingDiscardCardId) continue;
           final c = cardMap[id];
           if (c != null && !seen.contains(id)) {
             nextRows[r].add(c);
@@ -301,6 +320,8 @@ class _TableScreenState extends State<TableScreen> {
 
     // Yeni çekilen (henüz hiçbir sıraya girmemiş) kartı en uygun sıraya yerleştir
     for (final c in serverCards) {
+      if (c.id == _pendingDiscardCardId) continue;
+      if (c.id == _pendingDrawCardId && _activeFlyingCardAnim != null) continue;
       if (!seen.contains(c.id)) {
         int targetRow = 2;
         if (nextRows[0].length < 4) {
@@ -475,6 +496,7 @@ class _TableScreenState extends State<TableScreen> {
 
     setState(() {
       _selectedCardId = null;
+      _pendingDiscardCardId = card.id;
       for (final row in _localRows) {
         row.removeWhere((c) => c.id == card.id);
       }
@@ -730,50 +752,6 @@ class _TableScreenState extends State<TableScreen> {
                 children: [
                   _buildZyngaTopBar(table, gs),
 
-                  // BİLGİ / HATA BİLDİRİMİ (Üst barın altına yerleştirildi, sayaç ve skor asla kapanmaz)
-                  if (_toastBanner != null)
-                    Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 4),
-                      child: Material(
-                        color: Colors.transparent,
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 14,
-                            vertical: 7,
-                          ),
-                          decoration: BoxDecoration(
-                            color: const Color(0xFF0A2418).withValues(alpha: 0.96),
-                            borderRadius: BorderRadius.circular(20),
-                            border: Border.all(color: const Color(0xFFF59E0B)),
-                            boxShadow: const [
-                              BoxShadow(color: Colors.black87, blurRadius: 10),
-                            ],
-                          ),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              const Icon(
-                                Icons.notifications_active,
-                                color: Color(0xFFFBBF24),
-                                size: 15,
-                              ),
-                              const SizedBox(width: 8),
-                              Flexible(
-                                child: Text(
-                                  _toastBanner!,
-                                  style: const TextStyle(
-                                    color: Colors.white,
-                                    fontWeight: FontWeight.bold,
-                                    fontSize: 11.5,
-                                  ),
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-                    ),
-
                   // ORTA CASINO MASASI (Saat Yönünde Koltuklar, Pot, Gösterge Jokeri, Deste ve Atılan Kağıt)
                   Expanded(
                     flex: 46,
@@ -830,6 +808,54 @@ class _TableScreenState extends State<TableScreen> {
 
             // 8. SOHBET ÇEKMECESİ (+ HIZLI SOHBET KALIPLARI)
             if (_showChatDrawer) _buildChatDrawer(gs),
+
+            // 9. BİLGİ / HATA BİLDİRİMİ OVERLAY (Ekran düzenini ve eldeki kağıtları ASLA zıplatmaz)
+            if (_toastBanner != null)
+              Positioned(
+                top: 74,
+                left: 20,
+                right: 20,
+                child: Center(
+                  child: Material(
+                    color: Colors.transparent,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 14,
+                        vertical: 7,
+                      ),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF0A2418).withValues(alpha: 0.96),
+                        borderRadius: BorderRadius.circular(20),
+                        border: Border.all(color: const Color(0xFFF59E0B)),
+                        boxShadow: const [
+                          BoxShadow(color: Colors.black87, blurRadius: 10),
+                        ],
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Icon(
+                            Icons.notifications_active,
+                            color: Color(0xFFFBBF24),
+                            size: 15,
+                          ),
+                          const SizedBox(width: 8),
+                          Flexible(
+                            child: Text(
+                              _toastBanner!,
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontWeight: FontWeight.bold,
+                                fontSize: 11.5,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
           ],
         ),
       ),
@@ -866,12 +892,13 @@ class _TableScreenState extends State<TableScreen> {
           ),
           child: Row(
             children: [
+              // Masadan Ayrıl / Geri Butonu
               InkWell(
                 onTap: _confirmAndLeaveTable,
-                borderRadius: BorderRadius.circular(20),
+                borderRadius: BorderRadius.circular(16),
                 child: Container(
-                  width: 32,
-                  height: 32,
+                  width: 30,
+                  height: 30,
                   decoration: BoxDecoration(
                     shape: BoxShape.circle,
                     gradient: const LinearGradient(
@@ -879,32 +906,31 @@ class _TableScreenState extends State<TableScreen> {
                     ),
                     border: Border.all(
                       color: const Color(0xFFD4AF37),
-                      width: 1.5,
+                      width: 1.3,
                     ),
                   ),
                   child: const Icon(
                     Icons.arrow_back_ios_new_rounded,
                     color: Color(0xFFFDE047),
-                    size: 14,
+                    size: 13,
                   ),
                 ),
               ),
-              const SizedBox(width: 5),
+              const SizedBox(width: 4),
 
               // Masa Adı & Yardımlı/Yardımsız Mod Rozeti
               Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3.5),
                 decoration: BoxDecoration(
                   gradient: LinearGradient(
                     colors: table.isAssisted
                         ? const [Color(0xFF1E3A8A), Color(0xFF0F172A)]
                         : const [Color(0xFF991B1B), Color(0xFF450A0A)],
                   ),
-                  borderRadius: BorderRadius.circular(18),
+                  borderRadius: BorderRadius.circular(16),
                   border: Border.all(
                     color: const Color(0xFFD4AF37),
-                    width: 1.3,
+                    width: 1.2,
                   ),
                 ),
                 child: Row(
@@ -912,56 +938,50 @@ class _TableScreenState extends State<TableScreen> {
                   children: [
                     Text(
                       table.isAssisted ? '✨' : '🔥',
-                      style: const TextStyle(fontSize: 11),
+                      style: const TextStyle(fontSize: 10),
                     ),
-                    const SizedBox(width: 3),
+                    const SizedBox(width: 2),
                     Text(
                       table.isAssisted ? 'Yardımlı' : 'Yardımsız',
                       style: const TextStyle(
                         color: Color(0xFFFDE047),
                         fontWeight: FontWeight.w900,
-                        fontSize: 10,
+                        fontSize: 9.5,
                       ),
                     ),
                   ],
                 ),
               ),
-              const SizedBox(width: 5),
+              const SizedBox(width: 4),
 
-              // Masa Ödül Havuzu (Pot) Rozeti
-              Expanded(
-                child: Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
-                  decoration: BoxDecoration(
-                    color: Colors.black54,
-                    borderRadius: BorderRadius.circular(18),
-                    border: Border.all(
-                      color: const Color(0xFFD4AF37).withValues(alpha: 0.65),
-                    ),
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      const Text('🪙', style: TextStyle(fontSize: 12)),
-                      const SizedBox(width: 3),
-                      Flexible(
-                        child: Text(
-                          '${table.pot > 0 ? table.pot : table.entryFee}',
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontWeight: FontWeight.w900,
-                            fontSize: 11.5,
-                          ),
-                        ),
-                      ),
-                    ],
+              // Masa Ödül Havuzu (Pot) Rozeti (Kompakt, asla sıkışmaz)
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3.5),
+                decoration: BoxDecoration(
+                  color: Colors.black54,
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(
+                    color: const Color(0xFFD4AF37).withValues(alpha: 0.65),
                   ),
                 ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Text('🪙', style: TextStyle(fontSize: 11)),
+                    const SizedBox(width: 2),
+                    Text(
+                      '${table.pot > 0 ? table.pot : table.entryFee}',
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.w900,
+                        fontSize: 10.5,
+                      ),
+                    ),
+                  ],
+                ),
               ),
-              const SizedBox(width: 4),
+
+              const Spacer(),
 
               // 101 Puan Tablosu Butonu
               InkWell(
@@ -969,37 +989,33 @@ class _TableScreenState extends State<TableScreen> {
                   SoundFx.playCardTap();
                   setState(() => _showScoreboardModal = !_showScoreboardModal);
                 },
-                borderRadius: BorderRadius.circular(18),
+                borderRadius: BorderRadius.circular(16),
                 child: Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+                  height: 30,
+                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
                   decoration: BoxDecoration(
                     color: Colors.black54,
-                    borderRadius: BorderRadius.circular(18),
+                    borderRadius: BorderRadius.circular(16),
                     border: Border.all(color: const Color(0xFFD4AF37)),
                   ),
                   child: const Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      Icon(
-                        Icons.leaderboard,
-                        color: Color(0xFFFDE047),
-                        size: 12,
-                      ),
+                      Icon(Icons.leaderboard, color: Color(0xFFFDE047), size: 12),
                       SizedBox(width: 2),
                       Text(
                         '101',
                         style: TextStyle(
                           color: Color(0xFFFDE047),
                           fontWeight: FontWeight.w900,
-                          fontSize: 10.5,
+                          fontSize: 10,
                         ),
                       ),
                     ],
                   ),
                 ),
               ),
-              const SizedBox(width: 4),
+              const SizedBox(width: 3),
 
               // PUBG TARZI HOPARLÖR (DİNLE AÇIK / KAPALI)
               InkWell(
@@ -1007,49 +1023,26 @@ class _TableScreenState extends State<TableScreen> {
                   gs.toggleVoiceListen();
                   setState(() {});
                 },
-                borderRadius: BorderRadius.circular(18),
-                child: AnimatedContainer(
-                  duration: const Duration(milliseconds: 160),
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 7, vertical: 5),
+                borderRadius: BorderRadius.circular(16),
+                child: Container(
+                  width: 30,
+                  height: 30,
                   decoration: BoxDecoration(
-                    color: isListenOn
-                        ? const Color(0xFF065F46)
-                        : Colors.black54,
-                    borderRadius: BorderRadius.circular(18),
+                    shape: BoxShape.circle,
+                    color: isListenOn ? const Color(0xFF065F46) : Colors.black54,
                     border: Border.all(
-                      color: isListenOn
-                          ? const Color(0xFF34D399)
-                          : Colors.white38,
+                      color: isListenOn ? const Color(0xFF34D399) : Colors.white38,
                       width: 1.2,
                     ),
                   ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(
-                        isListenOn
-                            ? Icons.headset_rounded
-                            : Icons.headset_off_rounded,
-                        color: isListenOn
-                            ? const Color(0xFFFDE047)
-                            : Colors.white54,
-                        size: 14,
-                      ),
-                      const SizedBox(width: 3),
-                      Text(
-                        'Dinle',
-                        style: TextStyle(
-                          color: isListenOn ? Colors.white : Colors.white54,
-                          fontWeight: FontWeight.w900,
-                          fontSize: 9.5,
-                        ),
-                      ),
-                    ],
+                  child: Icon(
+                    isListenOn ? Icons.headset_rounded : Icons.headset_off_rounded,
+                    color: isListenOn ? const Color(0xFFFDE047) : Colors.white54,
+                    size: 13,
                   ),
                 ),
               ),
-              const SizedBox(width: 4),
+              const SizedBox(width: 3),
 
               // PUBG TARZI SÜREKLİ MİKROFON (KONUŞ CANLI / KAPALI)
               InkWell(
@@ -1057,58 +1050,26 @@ class _TableScreenState extends State<TableScreen> {
                   await gs.toggleContinuousMic();
                   setState(() {});
                 },
-                borderRadius: BorderRadius.circular(18),
-                child: AnimatedContainer(
-                  duration: const Duration(milliseconds: 160),
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+                borderRadius: BorderRadius.circular(16),
+                child: Container(
+                  width: 30,
+                  height: 30,
                   decoration: BoxDecoration(
-                    gradient: isMicOn
-                        ? const LinearGradient(
-                            colors: [Color(0xFF16A34A), Color(0xFF15803D)],
-                          )
-                        : const LinearGradient(
-                            colors: [Color(0xFF334155), Color(0xFF1E293B)],
-                          ),
-                    borderRadius: BorderRadius.circular(18),
+                    shape: BoxShape.circle,
+                    color: isMicOn ? const Color(0xFF16A34A) : const Color(0xFF1E293B),
                     border: Border.all(
-                      color: isMicOn
-                          ? const Color(0xFF86EFAC)
-                          : const Color(0xFFD4AF37),
-                      width: 1.3,
+                      color: isMicOn ? const Color(0xFF86EFAC) : const Color(0xFFD4AF37),
+                      width: 1.2,
                     ),
-                    boxShadow: isMicOn
-                        ? [
-                            BoxShadow(
-                              color: const Color(0xFF22C55E)
-                                  .withValues(alpha: 0.55),
-                              blurRadius: 8,
-                            ),
-                          ]
-                        : null,
                   ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(
-                        isMicOn ? Icons.mic_rounded : Icons.mic_off_rounded,
-                        color: isMicOn ? Colors.white : Colors.white70,
-                        size: 14,
-                      ),
-                      const SizedBox(width: 3),
-                      Text(
-                        isMicOn ? 'Konuş' : 'Kapalı',
-                        style: TextStyle(
-                          color: isMicOn ? Colors.white : Colors.white70,
-                          fontWeight: FontWeight.w900,
-                          fontSize: 9.5,
-                        ),
-                      ),
-                    ],
+                  child: Icon(
+                    isMicOn ? Icons.mic_rounded : Icons.mic_off_rounded,
+                    color: isMicOn ? Colors.white : Colors.white70,
+                    size: 13,
                   ),
                 ),
               ),
-              const SizedBox(width: 4),
+              const SizedBox(width: 3),
 
               // OYUN SESİ AÇ / KAPA (MUTE) BUTONU
               InkWell(
@@ -1119,50 +1080,43 @@ class _TableScreenState extends State<TableScreen> {
                     enabled ? '🔊 Oyun sesleri açıldı' : '🔇 Oyun sesleri kapatıldı',
                   );
                 },
-                borderRadius: BorderRadius.circular(18),
+                borderRadius: BorderRadius.circular(16),
                 child: Container(
-                  width: 32,
-                  height: 32,
+                  width: 30,
+                  height: 30,
                   decoration: BoxDecoration(
                     shape: BoxShape.circle,
-                    color: SoundFx.soundEnabled
-                        ? const Color(0xFF064E3B)
-                        : Colors.black54,
+                    color: SoundFx.soundEnabled ? const Color(0xFF064E3B) : Colors.black54,
                     border: Border.all(
-                      color: SoundFx.soundEnabled
-                          ? const Color(0xFF34D399)
-                          : Colors.white38,
+                      color: SoundFx.soundEnabled ? const Color(0xFF34D399) : Colors.white38,
                       width: 1.2,
                     ),
                   ),
                   child: Icon(
-                    SoundFx.soundEnabled
-                        ? Icons.volume_up_rounded
-                        : Icons.volume_off_rounded,
-                    color: SoundFx.soundEnabled
-                        ? const Color(0xFFFDE047)
-                        : Colors.white54,
-                    size: 15,
+                    SoundFx.soundEnabled ? Icons.volume_up_rounded : Icons.volume_off_rounded,
+                    color: SoundFx.soundEnabled ? const Color(0xFFFDE047) : Colors.white54,
+                    size: 13,
                   ),
                 ),
               ),
-              const SizedBox(width: 4),
+              const SizedBox(width: 3),
 
+              // SOHBET BUTONU (ASLA TAŞMAZ)
               InkWell(
                 onTap: () => setState(() => _showChatDrawer = !_showChatDrawer),
-                borderRadius: BorderRadius.circular(18),
+                borderRadius: BorderRadius.circular(16),
                 child: Container(
-                  width: 32,
-                  height: 32,
+                  width: 30,
+                  height: 30,
                   decoration: BoxDecoration(
                     shape: BoxShape.circle,
                     color: Colors.black54,
-                    border: Border.all(color: const Color(0xFFD4AF37)),
+                    border: Border.all(color: const Color(0xFFD4AF37), width: 1.2),
                   ),
                   child: const Icon(
                     Icons.chat_bubble_outline,
                     color: Color(0xFFFDE047),
-                    size: 14,
+                    size: 13,
                   ),
                 ),
               ),
@@ -1288,6 +1242,42 @@ class _TableScreenState extends State<TableScreen> {
                 ),
               ),
 
+            // MASA SOL-ALT HIZLI SOHBET AÇMA BUTONU
+            Positioned(
+              left: 10,
+              bottom: 6,
+              child: InkWell(
+                onTap: () => setState(() => _showChatDrawer = true),
+                borderRadius: BorderRadius.circular(16),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF1E293B).withValues(alpha: 0.88),
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(color: const Color(0xFFD4AF37), width: 1.2),
+                    boxShadow: const [
+                      BoxShadow(color: Colors.black45, blurRadius: 4, offset: Offset(0, 2)),
+                    ],
+                  ),
+                  child: const Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.chat_bubble, color: Color(0xFFFDE047), size: 12),
+                      SizedBox(width: 4),
+                      Text(
+                        'Sohbet',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 10,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+
             // GERÇEKÇİ UÇAN KART ANİMASYONU (Desteden Ele / Elden Masaya)
             if (_activeFlyingCardAnim != null)
               _buildRealisticFlyingCardOverlay(
@@ -1381,26 +1371,9 @@ class _TableScreenState extends State<TableScreen> {
                           width: 44,
                           height: 64,
                         )
-                      : Container(
+                      : const CardBackWidget(
                           width: 44,
                           height: 64,
-                          decoration: BoxDecoration(
-                            gradient: const LinearGradient(
-                              colors: [Color(0xFF1E3A8A), Color(0xFF172554)],
-                            ),
-                            borderRadius: BorderRadius.circular(8),
-                            border: Border.all(
-                              color: const Color(0xFFD4AF37),
-                              width: 1.5,
-                            ),
-                          ),
-                          child: const Center(
-                            child: Icon(
-                              Icons.style_rounded,
-                              color: Color(0xFFFBBF24),
-                              size: 22,
-                            ),
-                          ),
                         ),
                 ),
               ),
@@ -2404,9 +2377,9 @@ class _TableScreenState extends State<TableScreen> {
       builder: (context, constraints) {
         final maxW = constraints.maxWidth;
         final maxH = constraints.maxHeight;
-        final rowH = (maxH / 3.0).clamp(74.0, 130.0);
-        final cardH = (rowH * 0.94).clamp(68.0, 118.0);
-        final cardW = (cardH * 0.70).clamp(48.0, 84.0);
+        final rowH = (maxH / 3.0).floorToDouble().clamp(74.0, 126.0);
+        final cardH = (rowH * 0.94).floorToDouble().clamp(68.0, 116.0);
+        final cardW = (cardH * 0.70).floorToDouble().clamp(48.0, 82.0);
 
         return GestureDetector(
           behavior: HitTestBehavior.translucent,
@@ -2582,6 +2555,11 @@ class _TableScreenState extends State<TableScreen> {
     for (int idx = 0; idx < count; idx++) {
       final card = rowCards[idx];
       final cardId = card.id;
+
+      // Atılan veya çekilmekte olan kart uçuş animasyonu bitene kadar burada çift çizilmez
+      if (cardId == _pendingDiscardCardId) continue;
+      if (cardId == _pendingDrawCardId && _activeFlyingCardAnim != null) continue;
+
       final isDragging = _draggingCardId == cardId;
 
       // Sürüklenen kart ayrı olarak en üstte render edilecekse bu sırada çizme

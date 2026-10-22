@@ -128,9 +128,9 @@ class VectorCardPainter extends CustomPainter {
       return;
     }
 
-    // RESİMLİ KARTLAR (J, Q, K) - Kraliyet Rozeti
+    // RESİMLİ KARTLAR (J, Q, K) - Çift Başlı Otantik Kraliyet Portresi
     if (rank >= 11 && rank <= 13) {
-      _drawRoyalMedallion(canvas, w, h, center, color);
+      _drawRoyalCourtFigure(canvas, w, h, center, color);
       return;
     }
 
@@ -138,43 +138,282 @@ class VectorCardPainter extends CustomPainter {
     _drawPipMatrix(canvas, w, h, color);
   }
 
-  void _drawRoyalMedallion(Canvas canvas, double w, double h, Offset center, Color color) {
-    final double mw = (w * 0.52).clamp(22.0, 42.0);
-    final double mh = (h * 0.58).clamp(30.0, 60.0);
+  void _drawRoyalCourtFigure(Canvas canvas, double w, double h, Offset center, Color color) {
+    final double mw = (w * 0.54).clamp(24.0, 48.0);
+    final double mh = (h * 0.62).clamp(34.0, 72.0);
 
     final rect = Rect.fromCenter(center: center, width: mw, height: mh);
-    final rrect = RRect.fromRectAndRadius(rect, Radius.circular(mw * 0.18));
+    final rrect = RRect.fromRectAndRadius(rect, const Radius.circular(4.0));
 
-    // Arka plan altın çerçeveli minyatür
-    final bgPaint = Paint()..color = color.withValues(alpha: 0.05);
+    // 1. Minyatür Portre Çerçevesi ve Arka Planı
+    final bgPaint = Paint()..color = const Color(0xFFFAF7EE);
     canvas.drawRRect(rrect, bgPaint);
 
-    final strokePaint = Paint()
-      ..color = const Color(0xFFD4AF37).withValues(alpha: 0.75)
+    final borderPaint = Paint()
+      ..color = const Color(0xFFD4AF37)
       ..style = PaintingStyle.stroke
       ..strokeWidth = 1.0;
-    canvas.drawRRect(rrect, strokePaint);
+    canvas.drawRRect(rrect, borderPaint);
 
-    // Merkez Harfi (J, Q, K)
-    final label = _getRankLabel();
-    final double fontSize = (mw * 0.50).clamp(12.0, 22.0);
-    final textSpan = TextSpan(
-      text: label,
-      style: TextStyle(
-        color: color,
-        fontSize: fontSize,
-        fontWeight: FontWeight.w900,
-        height: 1.0,
-      ),
+    // İç ince süs çizgisi
+    final innerRRect = RRect.fromRectAndRadius(
+      rect.deflate(1.8),
+      const Radius.circular(2.5),
     );
-    final tp = TextPainter(text: textSpan, textDirection: TextDirection.ltr);
-    tp.layout();
-    tp.paint(canvas, Offset(center.dx - tp.width / 2, center.dy - tp.height / 2));
+    final innerBorderPaint = Paint()
+      ..color = color.withValues(alpha: 0.18)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 0.6;
+    canvas.drawRRect(innerRRect, innerBorderPaint);
 
-    // Üstte ve altta minik takım sembolü
-    final double miniSize = (mw * 0.28).clamp(6.0, 10.0);
-    _drawSuitVector(canvas, suit, Offset(center.dx, rect.top + miniSize * 0.9), miniSize, color);
-    _drawSuitVector(canvas, suit, Offset(center.dx, rect.bottom - miniSize * 0.9), miniSize, color);
+    // Ortadan geçen yatay zarif bölücü kuşak (Sash)
+    final double halfH = mh / 2;
+    final dividerPaint = Paint()
+      ..color = const Color(0xFFD4AF37).withValues(alpha: 0.85)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 0.8;
+    canvas.drawLine(
+      Offset(rect.left + 2, center.dy),
+      Offset(rect.right - 2, center.dy),
+      dividerPaint,
+    );
+
+    // Kuşak ortasındaki küçük kraliyet baklava motifi
+    final diamondPath = Path()
+      ..moveTo(center.dx, center.dy - 3)
+      ..lineTo(center.dx + 4, center.dy)
+      ..lineTo(center.dx, center.dy + 3)
+      ..lineTo(center.dx - 4, center.dy)
+      ..close();
+    canvas.drawPath(diamondPath, Paint()..color = const Color(0xFFD4AF37));
+
+    // 2. ÇİFT BAŞLI PORTRE ÇİZİMİ (ÜST DÜZ & ALT 180° TERS)
+    _drawHalfCourtFigure(canvas, mw, halfH, center, color, isTop: true);
+    _drawHalfCourtFigure(canvas, mw, halfH, center, color, isTop: false);
+  }
+
+  void _drawHalfCourtFigure(
+    Canvas canvas,
+    double mw,
+    double halfH,
+    Offset center,
+    Color color, {
+    required bool isTop,
+  }) {
+    canvas.save();
+    canvas.translate(center.dx, center.dy);
+    if (!isTop) {
+      canvas.rotate(math.pi);
+    }
+
+    final double s = (mw / 36.0).clamp(0.65, 1.35);
+
+    // 1. OMUZLAR & KRALİYET BORNOZU / YELKASI (Robe & Mantle)
+    final robePath = Path();
+    robePath.moveTo(-mw * 0.44, 0);
+    robePath.lineTo(-mw * 0.40, -halfH * 0.40);
+    robePath.cubicTo(
+      -mw * 0.28, -halfH * 0.60,
+      -mw * 0.12, -halfH * 0.58,
+      -mw * 0.08, -halfH * 0.52,
+    );
+    robePath.lineTo(0, -halfH * 0.32);
+    robePath.lineTo(mw * 0.08, -halfH * 0.52);
+    robePath.cubicTo(
+      mw * 0.12, -halfH * 0.58,
+      mw * 0.28, -halfH * 0.60,
+      mw * 0.40, -halfH * 0.40,
+    );
+    robePath.lineTo(mw * 0.44, 0);
+    robePath.close();
+
+    final robeColor = (suit == 'H' || suit == 'D')
+        ? const Color(0xFFDC2626).withValues(alpha: 0.12)
+        : const Color(0xFF1E293B).withValues(alpha: 0.12);
+    canvas.drawPath(robePath, Paint()..color = robeColor);
+    canvas.drawPath(
+      robePath,
+      Paint()
+        ..color = const Color(0xFFD4AF37).withValues(alpha: 0.70)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 0.8,
+    );
+
+    // 2. YÜZ & BAŞ (Head & Face)
+    final headY = -halfH * 0.65;
+    final headR = 6.2 * s;
+    final facePaint = Paint()..color = const Color(0xFFFFF7ED);
+    canvas.drawCircle(Offset(0, headY), headR, facePaint);
+    canvas.drawCircle(
+      Offset(0, headY),
+      headR,
+      Paint()
+        ..color = color.withValues(alpha: 0.60)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 0.7,
+    );
+
+    // Saçlar
+    final hairPaint = Paint()..color = color.withValues(alpha: 0.75);
+    canvas.drawCircle(Offset(-headR * 0.85, headY + 1 * s), 2.8 * s, hairPaint);
+    canvas.drawCircle(Offset(headR * 0.85, headY + 1 * s), 2.8 * s, hairPaint);
+
+    // Gözler
+    final eyePaint = Paint()..color = color;
+    canvas.drawCircle(Offset(-2.0 * s, headY - 0.8 * s), 0.75 * s, eyePaint);
+    canvas.drawCircle(Offset(2.0 * s, headY - 0.8 * s), 0.75 * s, eyePaint);
+
+    // 3. FİGÜRE ÖZGÜ ÇİZİMLER (J / Q / K)
+    if (rank == 13) {
+      // PAPAZ / KRAL (KING - K)
+      final beardPath = Path();
+      beardPath.moveTo(-3.2 * s, headY + 2.2 * s);
+      beardPath.cubicTo(-2.0 * s, headY + 5.8 * s, 2.0 * s, headY + 5.8 * s, 3.2 * s, headY + 2.2 * s);
+      beardPath.lineTo(0, headY + 6.6 * s);
+      beardPath.close();
+      canvas.drawPath(beardPath, Paint()..color = color.withValues(alpha: 0.85));
+
+      final crownY = headY - headR;
+      final crownPath = Path()
+        ..moveTo(-headR * 0.95, crownY + 1.5 * s)
+        ..lineTo(-headR * 0.80, crownY - 5.5 * s)
+        ..lineTo(-headR * 0.35, crownY - 1.5 * s)
+        ..lineTo(0, crownY - 7.5 * s)
+        ..lineTo(headR * 0.35, crownY - 1.5 * s)
+        ..lineTo(headR * 0.80, crownY - 5.5 * s)
+        ..lineTo(headR * 0.95, crownY + 1.5 * s)
+        ..close();
+      canvas.drawPath(crownPath, Paint()..color = const Color(0xFFF59E0B));
+      canvas.drawPath(
+        crownPath,
+        Paint()
+          ..color = const Color(0xFFB45309)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 0.8,
+      );
+      canvas.drawCircle(Offset(0, crownY - 3.5 * s), 1.2 * s, Paint()..color = const Color(0xFFDC2626));
+
+      // Sağ elde Kraliyet Kılıcı
+      final swordX = mw * 0.30;
+      final swordPath = Path()
+        ..moveTo(swordX, -halfH * 0.85)
+        ..lineTo(swordX + 1.2 * s, -halfH * 0.15)
+        ..lineTo(swordX - 1.2 * s, -halfH * 0.15)
+        ..close();
+      canvas.drawPath(swordPath, Paint()..color = const Color(0xFF94A3B8));
+      canvas.drawRect(
+        Rect.fromCenter(center: Offset(swordX, -halfH * 0.15), width: 6.5 * s, height: 1.5 * s),
+        Paint()..color = const Color(0xFFD4AF37),
+      );
+
+    } else if (rank == 12) {
+      // KIZ / KRALİÇE (QUEEN - Q)
+      canvas.drawArc(
+        Rect.fromCenter(center: Offset(0, headY + 2.2 * s), width: 3.2 * s, height: 2.0 * s),
+        0.2,
+        math.pi - 0.4,
+        false,
+        Paint()
+          ..color = const Color(0xFFDC2626)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 0.8,
+      );
+
+      final crownY = headY - headR;
+      final tiaraPath = Path()
+        ..moveTo(-headR * 0.90, crownY + 1.5 * s)
+        ..cubicTo(-headR * 0.5, crownY - 5.0 * s, headR * 0.5, crownY - 5.0 * s, headR * 0.90, crownY + 1.5 * s)
+        ..lineTo(headR * 0.60, crownY - 0.5 * s)
+        ..lineTo(0, crownY - 6.0 * s)
+        ..lineTo(-headR * 0.60, crownY - 0.5 * s)
+        ..close();
+      canvas.drawPath(tiaraPath, Paint()..color = const Color(0xFFF59E0B));
+      canvas.drawPath(
+        tiaraPath,
+        Paint()
+          ..color = const Color(0xFFB45309)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 0.7,
+      );
+      for (double px in [-4.0 * s, 0, 4.0 * s]) {
+        canvas.drawCircle(Offset(px, crownY - 2.5 * s), 0.9 * s, Paint()..color = Colors.white);
+      }
+
+      // Sağ elde Kraliyet Çiçeği / Asası
+      final flowerX = mw * 0.28;
+      final flowerY = -halfH * 0.50;
+      canvas.drawLine(
+        Offset(flowerX, flowerY + 6 * s),
+        Offset(flowerX, 0),
+        Paint()
+          ..color = const Color(0xFFD4AF37)
+          ..strokeWidth = 1.0,
+      );
+      canvas.drawCircle(Offset(flowerX, flowerY), 2.6 * s, Paint()..color = const Color(0xFFE11D48));
+      canvas.drawCircle(Offset(flowerX, flowerY), 1.0 * s, Paint()..color = const Color(0xFFFEF08A));
+
+    } else {
+      // VALET / ŞÖVALYE (JACK - J)
+      canvas.drawArc(
+        Rect.fromCenter(center: Offset(0, headY + 2.0 * s), width: 4.0 * s, height: 1.5 * s),
+        0.1,
+        math.pi - 0.2,
+        false,
+        Paint()
+          ..color = color
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 0.8,
+      );
+
+      final capY = headY - headR * 0.6;
+      final capPath = Path()
+        ..moveTo(-headR * 1.10, capY + 1.0 * s)
+        ..cubicTo(-headR * 0.8, capY - 6.5 * s, headR * 0.5, capY - 7.5 * s, headR * 1.05, capY - 1.5 * s)
+        ..lineTo(headR * 0.75, capY + 1.5 * s)
+        ..close();
+      canvas.drawPath(capPath, Paint()..color = const Color(0xFF2563EB));
+      canvas.drawPath(
+        capPath,
+        Paint()
+          ..color = const Color(0xFF1D4ED8)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 0.8,
+      );
+      final featherPath = Path()
+        ..moveTo(-headR * 0.70, capY - 3.0 * s)
+        ..cubicTo(-headR * 1.30, capY - 8.0 * s, -headR * 0.90, capY - 11.0 * s, -headR * 0.30, capY - 7.0 * s);
+      canvas.drawPath(
+        featherPath,
+        Paint()
+          ..color = const Color(0xFFF59E0B)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1.3,
+      );
+
+      // Sağ elde Mızrak
+      final spearX = mw * 0.30;
+      canvas.drawLine(
+        Offset(spearX, -halfH * 0.80),
+        Offset(spearX, 0),
+        Paint()
+          ..color = const Color(0xFF94A3B8)
+          ..strokeWidth = 1.1,
+      );
+      final spearHead = Path()
+        ..moveTo(spearX, -halfH * 0.85)
+        ..lineTo(spearX + 3.0 * s, -halfH * 0.70)
+        ..lineTo(spearX, -halfH * 0.74)
+        ..lineTo(spearX - 3.0 * s, -halfH * 0.70)
+        ..close();
+      canvas.drawPath(spearHead, Paint()..color = const Color(0xFF64748B));
+    }
+
+    // Sol üstte minik Takım Sembolü (Suit Vector)
+    final miniSuitX = -mw * 0.28;
+    final miniSuitY = -halfH * 0.72;
+    _drawSuitVector(canvas, suit, Offset(miniSuitX, miniSuitY), 5.5 * s, color);
+
+    canvas.restore();
   }
 
   void _drawPipMatrix(Canvas canvas, double w, double h, Color color) {

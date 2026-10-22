@@ -168,7 +168,7 @@ class PlayingCardWidget extends StatelessWidget {
   }
 }
 
-/// Lüks Kraliyet Laciverti & Altın Filigranlı Kapalı İskambil Sırtı
+/// Orijinal Bicycle Kırmızı & Altın Filigranlı Otantik Casino İskambil Sırtı
 class CardBackWidget extends StatelessWidget {
   final double width;
   final double height;
@@ -185,115 +185,199 @@ class CardBackWidget extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final double radius = (width * 0.13).clamp(6.0, 11.0);
-
     return GestureDetector(
       onTap: onTap,
       child: Stack(
         clipBehavior: Clip.none,
         children: [
+          // Katmanlı 3D deste efekti (Alttaki kart gölgeleri)
           if (deckCount != null && deckCount! > 2)
             Positioned(
               left: 3,
               top: 3,
-              child: _buildSingleBack(radius, darken: 0.25),
+              child: _buildBackPainter(darken: 0.28),
             ),
           if (deckCount != null && deckCount! > 1)
             Positioned(
               left: 1.5,
               top: 1.5,
-              child: _buildSingleBack(radius, darken: 0.12),
+              child: _buildBackPainter(darken: 0.14),
             ),
-          _buildSingleBack(radius, showCount: deckCount != null),
-        ],
-      ),
-    );
-  }
+          _buildBackPainter(darken: 0.0),
 
-  Widget _buildSingleBack(
-    double radius, {
-    double darken = 0.0,
-    bool showCount = false,
-  }) {
-    return Container(
-      width: width,
-      height: height,
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(radius),
-        color: const Color(0xFFF8FAFC),
-        border: Border.all(
-          color: const Color(0xFFE2E8F0),
-          width: 1.6,
-        ),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.42),
-            blurRadius: 5,
-            offset: const Offset(0, 3),
-          ),
-        ],
-      ),
-      padding: const EdgeInsets.all(2.5),
-      child: Container(
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular((radius - 2.5).clamp(4.0, 9.0)),
-          gradient: LinearGradient(
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-            colors: [
-              Color.lerp(const Color(0xFF1E3A8A), Colors.black, darken)!,
-              Color.lerp(const Color(0xFF0F172A), Colors.black, darken)!,
-            ],
-          ),
-          border: Border.all(
-            color: const Color(0xFFD4AF37).withValues(alpha: 0.75),
-            width: 1.0,
-          ),
-        ),
-        child: Center(
-          child: showCount && deckCount != null
-              ? Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+          // Deste kart sayısı göstergesi rozeti
+          if (deckCount != null)
+            Positioned.fill(
+              child: Center(
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2.5),
                   decoration: BoxDecoration(
-                    color: Colors.black.withValues(alpha: 0.65),
-                    borderRadius: BorderRadius.circular(8),
+                    color: const Color(0xFF0F172A).withValues(alpha: 0.90),
+                    borderRadius: BorderRadius.circular(10),
                     border: Border.all(
                       color: const Color(0xFFD4AF37),
-                      width: 1,
+                      width: 1.2,
                     ),
+                    boxShadow: const [
+                      BoxShadow(
+                        color: Colors.black54,
+                        blurRadius: 4,
+                        offset: Offset(0, 2),
+                      ),
+                    ],
                   ),
                   child: Text(
                     '$deckCount',
                     style: const TextStyle(
                       color: Color(0xFFFDE047),
                       fontWeight: FontWeight.w900,
-                      fontSize: 11,
-                    ),
-                  ),
-                )
-              : Container(
-                  width: width * 0.46,
-                  height: width * 0.46,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    border: Border.all(
-                      color: const Color(0xFFD4AF37).withValues(alpha: 0.65),
-                      width: 1.1,
-                    ),
-                  ),
-                  child: Center(
-                    child: Text(
-                      '♠',
-                      style: TextStyle(
-                        color: const Color(0xFFD4AF37).withValues(alpha: 0.85),
-                        fontSize: (width * 0.24).clamp(10.0, 16.0),
-                      ),
+                      fontSize: 11.5,
+                      letterSpacing: 0.5,
                     ),
                   ),
                 ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildBackPainter({double darken = 0.0}) {
+    return Container(
+      width: width,
+      height: height,
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular((width * 0.12).clamp(5.0, 10.0)),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.40),
+            blurRadius: 5,
+            offset: const Offset(0, 2.5),
+          ),
+        ],
+      ),
+      child: CustomPaint(
+        size: Size(width, height),
+        painter: ClassicCardBackPainter(
+          darken: darken,
+          isRed: true,
         ),
       ),
     );
+  }
+}
+
+/// Gerçek Casino Deste Arkası Çizim Motoru (Bicycle Crimson Red & Diamond Lattice)
+class ClassicCardBackPainter extends CustomPainter {
+  final double darken;
+  final bool isRed;
+
+  const ClassicCardBackPainter({
+    this.darken = 0.0,
+    this.isRed = true,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final w = size.width;
+    final h = size.height;
+    final radius = (w * 0.12).clamp(5.0, 10.0);
+
+    // 1. Dış Beyaz Casino Emniyet Kenarlığı
+    final outerRRect = RRect.fromRectAndRadius(
+      Rect.fromLTWH(0, 0, w, h),
+      Radius.circular(radius),
+    );
+    final whitePaint = Paint()..color = const Color(0xFFFBFBFA);
+    canvas.drawRRect(outerRRect, whitePaint);
+
+    final outerBorderPaint = Paint()
+      ..color = const Color(0xFFCBD5E1)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.0;
+    canvas.drawRRect(outerRRect, outerBorderPaint);
+
+    // 2. İç Kırmızı / Bordo Lake Alan
+    final margin = (w * 0.06).clamp(2.5, 4.5);
+    final innerRRect = RRect.fromRectAndRadius(
+      Rect.fromLTWH(margin, margin, w - margin * 2, h - margin * 2),
+      Radius.circular(radius - 1.5),
+    );
+
+    final baseRed = isRed ? const Color(0xFF991B1B) : const Color(0xFF1E3A8A);
+    final darkRed = isRed ? const Color(0xFF6B1111) : const Color(0xFF0F172A);
+    final c1 = Color.lerp(baseRed, Colors.black, darken)!;
+    final c2 = Color.lerp(darkRed, Colors.black, darken)!;
+
+    final bgPaint = Paint()
+      ..shader = LinearGradient(
+        begin: Alignment.topLeft,
+        end: Alignment.bottomRight,
+        colors: [c1, c2],
+      ).createShader(Rect.fromLTWH(margin, margin, w - margin * 2, h - margin * 2));
+    canvas.drawRRect(innerRRect, bgPaint);
+
+    // Altın iç çerçeve çizgisi
+    final goldBorderPaint = Paint()
+      ..color = const Color(0xFFD4AF37).withValues(alpha: 0.75 * (1.0 - darken * 0.5))
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 0.8;
+    canvas.drawRRect(innerRRect, goldBorderPaint);
+
+    // 3. Geometrik İskambil Baklava / Kafes Dokusu (Diamond Cross-Hatch)
+    canvas.save();
+    canvas.clipRRect(innerRRect);
+
+    final linePaint = Paint()
+      ..color = Colors.white.withValues(alpha: 0.12 * (1.0 - darken * 0.5))
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 0.6;
+
+    final step = (w * 0.14).clamp(6.0, 10.0);
+    for (double d = -h; d < w + h; d += step) {
+      canvas.drawLine(Offset(d, 0), Offset(d + h, h), linePaint);
+      canvas.drawLine(Offset(d, h), Offset(d + h, 0), linePaint);
+    }
+
+    // 4. Merkez Klasik Çift Simetrik Madalyon
+    final center = Offset(w / 2, h / 2);
+    final medR = (w * 0.22).clamp(10.0, 18.0);
+
+    // Madalyon dış halkası
+    final medRingPaint = Paint()
+      ..color = const Color(0xFFD4AF37).withValues(alpha: 0.85 * (1.0 - darken * 0.5))
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.0;
+    canvas.drawCircle(center, medR, medRingPaint);
+    canvas.drawCircle(
+      center,
+      medR * 0.82,
+      Paint()
+        ..color = Colors.black.withValues(alpha: 0.25)
+        ..style = PaintingStyle.fill,
+    );
+
+    // Madalyon içi altın maça / filigran motifi
+    final spadePaint = Paint()..color = const Color(0xFFD4AF37).withValues(alpha: 0.90);
+    final ss = medR * 0.55;
+    final path = Path()
+      ..moveTo(center.dx, center.dy - ss)
+      ..cubicTo(center.dx - ss * 0.5, center.dy - ss * 0.2, center.dx - ss, center.dy + ss * 0.2, center.dx - ss * 0.5, center.dy + ss * 0.6)
+      ..cubicTo(center.dx - ss * 0.2, center.dy + ss * 0.7, center.dx - ss * 0.1, center.dy + ss * 0.6, center.dx, center.dy + ss * 0.4)
+      ..cubicTo(center.dx + ss * 0.1, center.dy + ss * 0.6, center.dx + ss * 0.2, center.dy + ss * 0.7, center.dx + ss * 0.5, center.dy + ss * 0.6)
+      ..cubicTo(center.dx + ss, center.dy + ss * 0.2, center.dx + ss * 0.5, center.dy - ss * 0.2, center.dx, center.dy - ss);
+    path.moveTo(center.dx - ss * 0.2, center.dy + ss * 0.8);
+    path.lineTo(center.dx + ss * 0.2, center.dy + ss * 0.8);
+    path.lineTo(center.dx, center.dy + ss * 0.4);
+    path.close();
+    canvas.drawPath(path, spadePaint);
+
+    canvas.restore();
+  }
+
+  @override
+  bool shouldRepaint(covariant ClassicCardBackPainter oldDelegate) {
+    return oldDelegate.darken != darken || oldDelegate.isRed != isRed;
   }
 }
